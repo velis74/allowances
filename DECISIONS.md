@@ -165,3 +165,245 @@ class of "works in tests, breaks in prod" surprises.
 
 **Cost to revisit:** Low — swapping to SQLite later (e.g. for a faster CI matrix) is a
 `tests/settings.py` change only, no model changes expected.
+
+---
+
+Autonomous-session decisions made while implementing **Concern 2 (fulfillment engine)** —
+`django_licensing/engine.py` and `django_licensing/providers.py`. Same rules as above: dilemma,
+decision, reason, cost to revisit.
+
+## 10. `Wallet.wallet_type` (grant/consumable) does not change *how* consumption works — only draw
+priority
+
+**Dilemma:** README's Play-Billing-inspired language ("grant" = boolean entitlement, "consumable" =
+spendable budget) suggests grant wallets might not decrement at all when drawn from — they'd just
+gate a boolean check. But the `fulfillment_order` examples draw from grant wallets *before*
+consumable ones for the exact same feature and quantity, and `Wallet.balance`/`overdraft_limit`/
+`first_overdraft_at` are shared fields with no per-type branching in the concern-1 schema.
+
+**Decision:** Both wallet types are spent identically by `fulfill()` — same balance arithmetic,
+same `Transaction.kind = CONSUMPTION` regardless of which section funded the draw. `wallet_type`
+only changes *which* wallets a `fulfillment_order` step selects (i.e., priority/funding-source
+tier — "spend free grants before paid consumable budget"), never the mechanics of spending itself.
+
+**Reason:** This is the only reading consistent with the `fulfillment_order` examples actually
+walking both types with the same quantity/currency semantics, and it keeps `TransactionKind.GRANT`
+meaningful as "a credit/top-up event" (something a host application writes directly when funding a
+wallet — see README "Out of Scope" → "Granting wallets... is the responsibility of the
+application") as opposed to "a consumption event that happened to come from a grant-type wallet".
+
+**Cost to revisit:** High — this is the central mechanical assumption `_consume()` is built on. If
+a future session decides grant wallets should instead behave as non-decrementing boolean gates,
+`_consume()`/`_build_ordered_wallets()` need a real branch, not just a priority-ordering role, for
+`WalletType.GRANT`.
+
+## 11. Modifier "most favourable" is taken literally as `max(factors)`, even though it reads
+economically backwards
+
+**Dilemma:** README: "A modifier of 0.5 on `send_email` means each send costs half a unit... Where
+multiple modifiers apply, the most favourable (`max`) is used." A factor of 0.5 is *cheaper* than
+1.0, so intuitively the smaller factor is "more favourable" to the subject — which would suggest
+`min()`, not `max()`.
+
+**Decision:** Implemented literally as written: `_max_modifier_factor()` returns `max(factors)`.
+
+**Reason:** The README parenthesizes `(max)` immediately after "most favourable", which reads as
+the author defining what "favourable" means in this system rather than leaving it to be inferred —
+taking the text at its word is safer than substituting an economic intuition the author may not
+share (e.g. "favourable" from the *platform's* revenue-protection point of view, not the subject's
+cost point of view). See project memory: prefer verifying the stated rule over inventing a
+"friendlier" one.
+
+**Cost to revisit:** Low — `max(factors)` → `min(factors)` is a one-line change in
+`_max_modifier_factor()`; no schema impact. Flagging clearly here since it's the one place in this
+concern where literal-README and intuitive-README diverge, and a KlubIS consumer should sanity
+this before relying on it for a real discount/surcharge modifier.
+
+## 12. Overdraft: feature-level flag gates *whether* a second pass runs; per-wallet
+`overdraft_limit` (not `None`) gates *which* wallets it can draw from
+
+**Dilemma:** README/NEXT_STEPS say "a second pass is made over wallets with `overdraft: true`" —
+but `overdraft` is a *feature*-level boolean in the settings example, and `Wallet` has no boolean
+field at all, only a nullable `overdraft_limit` Decimal.
+
+**Decision:** `feature_def.overdraft` (bool) controls whether `fulfill()`/`peek()` attempt a second
+pass at all once the first pass leaves `remaining > 0`. Within that second pass, a wallet is
+eligible only if its own `overdraft_limit is not None`; capacity in that pass is
+`max(balance, 0) + overdraft_limit` (i.e. the wallet can go negative down to `-overdraft_limit`).
+
+**Reason:** This is the only combination that uses every field concern 1 actually built
+(`Wallet.overdraft_limit`, `Wallet.first_overdraft_at`) while also honouring the feature-level
+`overdraft` switch from the settings example — a feature can opt out of overdraft entirely even if
+some of its wallets happen to carry a limit (e.g. a limit configured for a *different* feature that
+also draws from the same wallet).
+
+**Cost to revisit:** Medium — changing which of the two flags is authoritative (or requiring both)
+is a behavioural change with no schema migration needed, but would change existing hosts' overdraft
+outcomes silently if not documented.
+
+## 13. Sliding-window `reset_config`: `None`/falsy means "not a sliding-window wallet at all", and
+concrete JSON key names for the four table rows
+
+**Dilemma:** The README's "Reset config options" table lists `None` as one of *four* values
+`reset_config` can take, with the meaning "Rolling window (last N seconds/hours/days)" — implying
+`reset_config = None` still means sliding-window (rolling variant), not "no sliding window". But
+`Wallet.balance` is documented in concern 1 as a plain "checkpoint" field, and nothing in the schema
+says how "last N seconds/hours/days" is parameterised when `reset_config` is literally `None` (no
+JSON body to carry N).
+
+**Decision:** `Wallet.reset_config` being DB-`None`/falsy means the wallet is **not**
+sliding-window at all — `wallet.balance` is the effective balance directly, exactly like every
+wallet built and tested in concern 1. Sliding-window mode requires a non-empty `reset_config` dict,
+whose shape determines which of the four table rows applies:
+- Rolling: `{"window_seconds": <int>}` (defaults to 86400 if the key is omitted but the dict is
+  non-empty, e.g. `{}` would be unusual but still resolves to a 24h rolling window rather than
+  erroring).
+- Daily: `{"time": "HH:MM:SS"}`
+- Weekly: `{"day_of_week": 0-6, "time": "HH:MM:SS"}` (0 = Monday, matching `datetime.weekday()`)
+- Monthly: `{"day_of_month": 1-31, "time": "HH:MM:SS"}` (clamped to the last day of shorter months)
+
+For a sliding-window wallet, `wallet.balance` is redefined as the **per-window allotment**
+(constant, never mutated by `fulfill()`/`unfulfill()`); `effective_balance()` computes
+`balance + sum(transactions within the current window)` on every call — see `window_start()` and
+`effective_balance()` in `engine.py`.
+
+**Reason:** This is the only reading that (a) keeps every existing concern-1 test and the
+`Wallet.balance` docstring ("checkpoint... not the effective balance" — only stated for
+sliding-window wallets) true without a migration, and (b) gives the rolling-window case an actual
+place to store its window length, which the README never specifies. The "checkpoint = allotment"
+model for sliding-window wallets specifically (rather than a running total) is what makes "resets
+every window" a real, computed behaviour instead of requiring a scheduled job to zero the balance
+out — matching the README's "computed on-the-fly" framing.
+
+**Cost to revisit:** Medium-high — this is a genuine judgment call with no README text to lean on
+beyond the four-row table and the "computed on-the-fly" sentence. If a future session (or KlubIS
+itself, as the first real consumer) wants `reset_config = None` to mean "rolling window with an
+implicit default length" instead, `effective_balance()`'s guard condition
+(`if not wallet.reset_config: return wallet.balance`) is the single place to change, but every
+sliding-window test in `tests/test_engine_sliding_window.py` would need its wallets given an
+explicit `reset_config` dict instead of relying on the current default-off behaviour.
+
+## 14. Rounding reconciliation: `qty_covered` is back-derived from the rounded currency cost, and
+clamped rather than exactly reconciled
+
+**Dilemma:** README states rounding is per-currency (floor/ceil/round/None) but never says how to
+reconcile a rounded wallet-currency debit against the feature-unit quantity being fulfilled — e.g.
+if `ceil` rounds a fractional cost up to more currency than the wallet actually holds, or up to more
+than corresponds to the remaining requested quantity.
+
+**Decision:** After rounding, if the rounded cost would exceed the wallet's available capacity, it
+is clamped down to exactly that capacity (never overdraws beyond what was already established as
+available). The feature-unit quantity credited for that draw (`qty_covered`) is then derived by
+dividing the (possibly clamped) rounded cost back by the effective rate, and is itself clamped to
+never exceed the remaining requested quantity. In edge cases (e.g. `ceil` on a very small fractional
+rate) this can charge a currency unit slightly out of exact proportion to the quantity nominally
+granted for that specific wallet's draw.
+
+**Reason:** No exact reconciliation is possible in general once rounding is introduced — some
+"error" has to land somewhere (the wallet, the requester, or be silently absorbed). Clamping to
+capacity guarantees the one invariant that matters most for a ledger library: a wallet's balance
+never goes past its (overdraft-adjusted) floor because of a rounding artifact. Tests
+(`test_fulfill_rounding_ceil`/`floor`/`round` in `tests/test_engine_fulfill.py`) were deliberately
+built with round numbers that don't hit this edge case, so this is documented as a known
+approximation rather than exhaustively tested.
+
+**Cost to revisit:** Low-medium — confined entirely to `_consume()` in `engine.py`; no schema
+impact. Worth a second look before this library is used for a currency where the requester cares
+about exact-to-the-unit reconciliation (e.g. legal/financial per-cent accounting) rather than
+"close enough, never overdraws".
+
+## 15. Archival trigger split into two mechanisms: automatic "drained" trigger inside `fulfill()`,
+plus a separate `archive_expired_wallets()` maintenance entry point
+
+**Dilemma:** README says "Fully consumed wallets are archived rather than deleted" but never
+defines "fully consumed", and a wallet can become permanently unusable in two different ways that
+`fulfill()` can't uniformly observe: (a) its balance is drawn down to zero with no overdraft left,
+which `fulfill()` *does* see (it just performed that draw); (b) its `valid_until` passes with the
+wallet never touched again, which nothing observes unless something polls for it — a wallet that
+expires without ever being fully drawn is invisible to `fulfill()`'s per-draw hook entirely, since
+`_validity_q()` already excludes expired wallets from every candidate query.
+
+**Decision:** Two separate mechanisms:
+- `_archive_if_drained(wallet)` runs inside `fulfill()`'s commit loop, immediately after a wallet is
+  drawn from, for wallets where `reset_config` is falsy (non-sliding-window) and
+  `balance <= 0 and overdraft_limit is None` (no possible future draw without a plan change).
+  Sliding-window wallets are never archived by this trigger — they are designed to replenish every
+  window, so "drained right now" carries no permanence.
+- `archive_expired_wallets(at=None)` is a standalone function a host application calls periodically
+  (e.g. Celery beat) to sweep wallets whose `valid_until` has passed, regardless of whether they
+  were ever drawn to zero.
+
+**Reason:** Splitting these was the only way to cover both cases without `fulfill()` scanning
+unrelated wallets it never touched on every call (expensive, and out of scope for a function whose
+job is to fulfil one request). This mirrors the existing "recovery flow" pattern the README already
+expects (`find_unattached_fulfillment_records()`, README: "A background job may monitor...") —
+maintenance sweeps are explicitly the host application's job, this library just provides the query/
+action.
+
+**Cost to revisit:** Low — both are additive; a future session could add more trigger conditions
+(e.g. archive on wallet close via `plan_switch`) without touching either existing path.
+
+## 16. `Transaction.storno_of` is `on_delete=PROTECT`, so archiving must delete storno rows before
+their originals
+
+**Dilemma:** Not a README ambiguity but a concrete bug hit while implementing archival: Django's
+`PROTECT` raises `ProtectedError` whenever *any* row references the one being deleted — even if
+that referencing row is *also* being deleted in the very same cascade. `wallet.delete()`'s
+CASCADE-based collection of the wallet's transactions therefore fails outright the moment a wallet
+has both an original and its storno transaction, because the storno's `storno_of` FK protects the
+original from deletion regardless of the storno also being slated for deletion.
+
+**Decision:** `_archive_wallet()` explicitly deletes all storno transactions for the wallet (the
+referencing side of `storno_of`) *before* calling `wallet.delete()`, so nothing is left pointing at
+an original by the time the cascade runs.
+
+**Reason:** Storno-of-storno never happens in practice (the one-storno-per-transaction DB
+constraint from concern 1, and `unfulfill()`'s own `.exclude(kind=STORNO)` guard, both prevent it),
+so a single flat "delete every storno row first" pass is sufficient — no need for a general
+topological-delete routine.
+
+**Cost to revisit:** Very low — purely an implementation detail inside `_archive_wallet()`; would
+only need revisiting if a future concern introduces multi-level storno chains.
+
+## 17. `plan_switch`'s `subjects` × `open_wallets` fan-out: every subject gets its own full copy of
+every `WalletSpec`
+
+**Dilemma:** README's Core API signature is `plan_switch(subjects, open_wallets, effective_date=None)`
+with `open_wallets: list[WalletSpec]` — but never states whether `subjects` is a single subject
+wrapped for API consistency, or genuinely plural, nor how a `WalletSpec` (which carries no subject
+field) maps onto multiple subjects if so.
+
+**Decision:** `subjects` is a `dict[str, Model]` exactly like `peek`/`fulfill`. Every value in that
+dict has ALL of its currently-valid wallets closed (`valid_until = effective_date`), and then
+receives its own newly created wallet for every `WalletSpec` in `open_wallets` — i.e. N subjects ×
+M specs = N×M new wallets, not M shared wallets somehow co-owned by N subjects.
+
+**Reason:** `Wallet.subject` is a single `GenericForeignKey`, so a wallet can only ever be owned by
+one subject — there is no schema-level way for two subjects to "share" one new wallet. Giving each
+subject its own full copy of the plan is the only interpretation that produces valid `Wallet` rows
+at all.
+
+**Cost to revisit:** Low — if a future caller only ever wants to switch a single subject's plan at a
+time (the more common real-world case, e.g. one member's individual plan change), the multi-subject
+fan-out is simply unused, not wrong; no migration implied either way.
+
+## 18. `general` currency flag is parsed and exposed but has no special engine-side behaviour yet
+
+**Dilemma:** README: "General-purpose currencies act as a fallback for any feature that accepts
+them" — but every worked example in the README explicitly lists every currency (including
+general-purpose ones like `credits`) in each feature's own `currencies` list. No example shows a
+feature relying on implicit fallback to a general currency it never listed.
+
+**Decision:** `CurrencyDefinition.general` is parsed from settings and available to callers/future
+providers, but `engine.py` does not auto-inject general-purpose currencies into a feature's
+accepted-currency list. A feature only draws from currencies it explicitly lists, general-purpose
+or not.
+
+**Reason:** Implementing implicit fallback would mean inventing a conversion rate for currencies a
+feature never declared a rate for — the README gives no rule for what that rate should be, and every
+example shows rates declared explicitly per feature. Doing nothing beyond what's demonstrated avoids
+guessing a mechanism the README doesn't actually specify.
+
+**Cost to revisit:** Low — purely additive; a future concern could add "if a feature accepts no
+currency explicitly, fall back to all `general=True` currencies at rate 1" without touching any
+existing behaviour, since today's behaviour (nothing implicit happens) is a strict subset.

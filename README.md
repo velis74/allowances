@@ -218,11 +218,28 @@ built incrementally by "concern":
 - **Concern 1 (done)** — DB schema only: `Wallet`, `WalletArchive`, `Transaction`,
   `TransactionArchive`, `FulfillmentRecord`, `LicenseModifier`. No `peek`/`fulfill`/`attach`/
   `unfulfill`/`plan_switch` engine, no settings-`LICENSING` provider, no fulfillment-order walk,
-  no sliding-window balance computation. See `NEXT_STEPS.md` for what's next and `DECISIONS.md`
-  for schema-level decisions the README above leaves open.
+  no sliding-window balance computation. See `DECISIONS.md` for schema-level decisions the README
+  above leaves open.
+- **Concern 2 (done)** — the fulfillment engine (`django_licensing/engine.py`) and the
+  settings-backed definition provider (`django_licensing/providers.py`, `DefinitionProvider` +
+  `SettingsProvider`). Implements `peek`/`fulfill`/`attach`/`unfulfill`/`plan_switch`, the
+  `fulfillment_order` walk (tuple list, shorthand strings, and dotted-string callable form),
+  overdraft's two-pass draw, `LicenseModifier` (max-of-applicable) cost adjustment, per-currency
+  rounding (`floor`/`ceil`/`round`/`None`), sliding-window balance computation for all four
+  `reset_config` shapes (rolling/daily/weekly/monthly), and wallet archival (both the "drained"
+  trigger inside `fulfill()` and the standalone `archive_expired_wallets()` maintenance entry
+  point). Every point where this concern had to make a judgment call the README leaves open is in
+  `DECISIONS.md` (entries 10 onward) — read those before relying on modifier "favourability"
+  direction, overdraft eligibility, or the sliding-window `reset_config` key names, all of which
+  are this library's own inventions, not README-specified.
+- No remote `ServerProvider`, no Django admin registration for the engine-level concepts beyond
+  what concern 1 already registered, no dotted-string `fulfillment_order` callable *authoring*
+  helpers (the mechanism works, but no example callable ships beyond the test suite's fixture).
+  See `NEXT_STEPS.md` for what's next.
 - Consumers of this library (e.g. KlubIS, see its `CLAUDE.md` poglavje 3/4 for the
-  "reusable module + setup module" pattern this library is designed to fit into) should treat
-  everything beyond the DB schema as **not yet implemented**.
+  "reusable module + setup module" pattern this library is designed to fit into) can now treat
+  `peek`/`fulfill`/`attach`/`unfulfill`/`plan_switch` as implemented and tested, subject to the
+  concern-2 decisions above.
 
 ---
 
