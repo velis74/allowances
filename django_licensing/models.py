@@ -66,6 +66,15 @@ class SubjectMixin(models.Model):
         ContentType,
         on_delete=models.CASCADE,
         related_name="+",
+        # `db_constraint=False`: see DECISIONS.md #19. A schema-per-tenant host application may
+        # install this app once per tenant schema while `django.contrib.contenttypes` stays a single
+        # shared table (Django's own recommended layout, and `django-tenants`' default) - a real FK
+        # from a per-tenant table to that shared table is legal to *create* (Postgres does not care
+        # which schema either side lives in) but breaks `TRUNCATE` of the shared table the moment a
+        # second schema exists, since Postgres considers the constraint regardless of which schema is
+        # on the connection's search_path. `db_constraint=False` keeps the relation for the ORM
+        # (`.subject`, `select_related`, `get_for_model`) without asking Postgres to enforce it.
+        db_constraint=False,
         help_text="Content type of the subject holding this record (a User, an Organisation, a Device, ...).",
     )
     subject_object_id = models.PositiveBigIntegerField(help_text="Primary key of the subject instance.")
@@ -223,6 +232,7 @@ class Transaction(models.Model):
         null=True,
         blank=True,
         related_name="+",
+        db_constraint=False,  # see SubjectMixin.subject_content_type above and DECISIONS.md #19.
         help_text="Content type of the attached domain object (set by attach(), a future concern).",
     )
     object_id = models.PositiveBigIntegerField(null=True, blank=True)
@@ -287,7 +297,9 @@ class WalletArchive(models.Model):
     """
 
     original_wallet_id = models.PositiveBigIntegerField()
-    subject_content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE, related_name="+")
+    subject_content_type = models.ForeignKey(
+        ContentType, on_delete=models.CASCADE, related_name="+", db_constraint=False
+    )  # see SubjectMixin.subject_content_type above and DECISIONS.md #19.
     subject_object_id = models.PositiveBigIntegerField()
     subject = GenericForeignKey("subject_content_type", "subject_object_id")
 
@@ -339,8 +351,8 @@ class TransactionArchive(models.Model):
         "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="storno_transactions"
     )
     object_content_type = models.ForeignKey(
-        ContentType, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
-    )
+        ContentType, on_delete=models.SET_NULL, null=True, blank=True, related_name="+", db_constraint=False
+    )  # see SubjectMixin.subject_content_type above and DECISIONS.md #19.
     object_id = models.PositiveBigIntegerField(null=True, blank=True)
     attached_object = GenericForeignKey("object_content_type", "object_id")
 

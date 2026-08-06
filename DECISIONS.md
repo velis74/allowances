@@ -407,3 +407,58 @@ guessing a mechanism the README doesn't actually specify.
 **Cost to revisit:** Low — purely additive; a future concern could add "if a feature accepts no
 currency explicitly, fall back to all `general=True` currencies at rate 1" without touching any
 existing behaviour, since today's behaviour (nothing implicit happens) is a strict subset.
+
+---
+
+Autonomous-session decision made while wiring the library into its first real consumer, **KlubIS**
+(`klubis-novi`, see its `CLAUDE.md` poglavje 3/4 for the "reusable module + setup module" pattern).
+Found by running KlubIS's full backend test suite after adding `django_licensing` to its
+`TENANT_APPS` (schema-per-tenant, `django-tenants`) — not a KlubIS-specific concern, so recorded
+here rather than only in KlubIS's own decision log.
+
+## 19. `ContentType` foreign keys use `db_constraint=False`
+
+**Dilemma (a real bug, not a judgment call left open by the README):** Every `ContentType` reference
+in this app (`SubjectMixin.subject_content_type` — used by `Wallet`/`LicenseModifier` — plus
+`Transaction.object_content_type`, `WalletArchive.subject_content_type`,
+`TransactionArchive.object_content_type`) was a plain `ForeignKey(ContentType, ...)`, i.e. a real,
+DB-enforced constraint. That is fine for a single-schema host application, but breaks for a
+schema-per-tenant one (`django-tenants` and equivalents): `django.contrib.contenttypes` conventionally
+stays a single shared table (Django's own recommendation, and this app's own `Wallet.subject` needs
+exactly one global `ContentType` catalogue regardless of which schema a subject's own table lives in),
+while a per-tenant host installs `django_licensing` itself once per tenant schema, because a wallet's
+*subject* (a member, a device, ...) is itself tenant-scoped data. The result: N tenant schemas each get
+their own `wallet`/`transaction`/... tables, all real-FK'd to the *one* shared `content_type` table.
+Postgres accepts creating such cross-schema FKs without complaint, but then refuses to `TRUNCATE` the
+shared table at all — `FeatureNotSupported: cannot truncate a table referenced in a foreign key
+constraint` — the instant a second schema exists with so much as an empty `django_licensing_wallet`
+table, regardless of whether it holds any rows. This is exactly what KlubIS's test suite hit: any
+`transaction=True` test that flushes the `public` schema (i.e. any test of a `SHARED_APPS` model, e.g.
+`users`, `clubs`, `competitions`) started failing at teardown the moment the first tenant schema with
+`django_licensing` migrated into it existed for the session — over a thousand cascading errors from one
+root cause.
+
+**Decision:** All four `ForeignKey(ContentType, ...)` fields now pass `db_constraint=False`. The
+relation still works for every ORM purpose this app needs (`Wallet.subject`, `select_related`,
+`ContentType.objects.get_for_model()`); what disappears is only the Postgres-enforced constraint and,
+with it, `on_delete`'s *database*-level enforcement (Django still runs its own `on_delete` logic in
+Python on `.delete()`, just without a DB-level backstop). New migration:
+`0002_alter_licensemodifier_subject_content_type_and_more.py`.
+
+**Reason:** A `ContentType` row is for all practical purposes immutable and is never deleted in normal
+operation, so losing the DB-level `on_delete` backstop costs nothing real. The alternative — forcing
+every schema-per-tenant host to install `django.contrib.contenttypes` itself as a per-tenant app so the
+FK stays same-schema — would mean a separate `ContentType` catalogue per tenant, which breaks
+`ContentType.objects.get_for_model()` returning a stable, cross-schema-comparable id for the same
+Python class, and is not how `django-tenants`-style projects are meant to be laid out in the first
+place. `db_constraint=False` is the same convention KlubIS's own codebase already uses for its own
+deliberate cross-schema references (its `billing-module.md` design doc, chapter 4, names it
+explicitly for exactly this reason), so this fix aligns the library with the one real consumer it has
+today rather than inventing a new convention.
+
+**Cost to revisit:** Low for this app's own code and tests (95 passed unchanged after the fix, `ruff`
+clean) — purely a field-option change plus one migration, no query or business-logic path referenced a
+real FK's behaviour. **Medium for any already-deployed consumer with existing data**: a project that
+installed this app in a single-schema layout and has come to rely on `ON DELETE CASCADE`/`SET NULL`
+actually running at the database level (e.g. bulk-deleting rows through raw SQL that bypasses the ORM)
+would need to re-verify that assumption. No such consumer exists yet (KlubIS is the first).
