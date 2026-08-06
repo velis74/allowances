@@ -1,0 +1,45 @@
+[project]
+name = "django-licensing"
+version = "0.1.0"
+description = "Flexible, extensible licensing and entitlement management for Django applications."
+requires-python = ">=3.11"
+dependencies = [
+    "Django>=5.1,<6",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-django", "psycopg2-binary", "coverage"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["django_licensing*"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+python_files = "test_*.py"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = ["E731", "E722"]
+fixable = ["ALL"]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+case-sensitive = false
+lines-between-types = 1
+combine-as-imports = true
+order-by-type = false

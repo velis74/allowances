@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtualenv
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Per-developer secrets (see tests/env.example.py)
+tests/env.py
+
+# OS
+.DS_Store
