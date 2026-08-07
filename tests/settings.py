@@ -1,9 +1,9 @@
 """
-Minimal Django settings module for running django-licensing's own test suite (pytest-django).
+Minimal Django settings for running the ``allowances_django`` test suite.
 
-Not shipped to consumers of the library — this is test-only scaffolding, analogous to the
-`setup` module in a host project, except here it exists purely to give the app registry and ORM
-something to run against.
+Test-only scaffolding: it exists to give the app registry and the ORM something to run against.
+The core's own tests (``tests/core/``) need none of this — they run against ``MemoryStore``
+without Django involved at all.
 """
 
 try:
@@ -14,7 +14,7 @@ except ImportError as exc:  # pragma: no cover - developer setup error, not a co
         "Postgres credentials (see DECISIONS.md for why Postgres, not SQLite)."
     ) from exc
 
-SECRET_KEY = "django-licensing-test-suite-not-for-production-use"
+SECRET_KEY = "allowances-test-suite-not-for-production-use"
 DEBUG = True
 USE_TZ = True
 
@@ -23,11 +23,14 @@ DATABASES = {"default": DATABASE}
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
-    "django_licensing",
+    "allowances_django",
 ]
 
-# No routes/middleware are needed to exercise models directly.
 MIDDLEWARE = []
 ROOT_URLCONF = None
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Individual tests inject their own definitions via SettingsProvider(config=...); this is only the
+# empty default so `SettingsProvider()` has something to read.
+ALLOWANCES = {"currencies": {}, "features": {}}

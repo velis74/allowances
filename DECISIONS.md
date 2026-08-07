@@ -1,8 +1,6 @@
-# DECISIONS.md — django-licensing
+# DECISIONS.md — allowances
 
-Autonomous-session decisions made while implementing **Concern 1 (DB schema)**, where the README
-(`/home/jure/Nextcloud/README_django_lic_lib.md`, copied into this repo as `README.md`) is silent
-or ambiguous about exact field types/precision/nullability. Each entry: dilemma, decision, reason,
+Autonomous-session decisions made while implementing **Concern 1 (DB schema)**. Each entry: dilemma, decision, reason,
 and how expensive it would be to revisit later.
 
 ## 1. Decimal precision for balances/amounts: `max_digits=20, decimal_places=6`
@@ -31,7 +29,7 @@ starts writing real values.
 layer (`settings.py`), but doesn't spell out how `Wallet.currency` should be typed.
 
 **Decision:** `CharField(max_length=100)`, no FK, no DB-level validation against
-`settings.LICENSING['currencies']`.
+`settings.ALLOWANCES['currencies']`.
 
 **Reason:** Direct application of the README's own "Definition vs. State" principle — a currency
 is not a row in this app's tables, it's a name defined in the host application's settings (and,
@@ -129,19 +127,17 @@ needless.
 
 **Cost to revisit:** Low.
 
-## 8. Python/Django app naming: package `django_licensing`, app label `django_licensing`
+## 8. Python/Django app naming: package `allowances_django`, app label `allowances_django`
 
-**Dilemma:** README never states the intended Python import path or Django `INSTALLED_APPS` label
-— just the pip-installable name `django-licensing` used throughout prose.
+**Dilemma:** The library needs a clear Python import path and Django `INSTALLED_APPS` label.
 
-**Decision:** Import package and app label both `django_licensing` (underscored form of the pip
-name), single `apps.py` with `DjangoLicensingConfig`, models in one `models.py` (not a `models/`
+**Decision:** Import package and app label both `allowances_django`, single `apps.py` with `AllowancesDjangoConfig`, models in one `models.py` (not a `models/`
 package) since concern 1 has only six models and splitting them now would add indirection without
 current benefit.
 
 **Reason:** Follows the common convention for `django-*` packages (pip name has dashes, import
-path has underscores) and keeps the KlubIS `setup`-module integration point predictable: `INSTALLED_APPS
-+= ["django_licensing"]`.
+path has underscores) and keeps the integration point predictable: `INSTALLED_APPS
++= ["allowances_django"]`.
 
 **Cost to revisit:** Very low pre-1.0, but a rename after publishing to PyPI/being pinned by
 KlubIS would be a breaking change for that consumer. Worth confirming before KlubIS actually adds
@@ -152,9 +148,8 @@ the dependency.
 **Dilemma:** README doesn't mandate a test database engine.
 
 **Decision:** Postgres (`tests/env.py`, gitignored, mirrors the `klubis-novi` `setup/env.py`
-convention; template in `tests/env.example.py`), using the same local `klubis` Postgres role
-already used by the `klubis-novi` project, but two dedicated databases (`django_licensing`,
-`test_django_licensing`) — never the `klubis-novi` database itself.
+convention; template in `tests/env.example.py`), using a local Postgres role, but two dedicated databases (`allowances`,
+`test_allowances`) — never the host database itself.
 
 **Reason:** Production is Postgres (per `klubis-novi`'s own `CLAUDE.md`, and per this library's
 own `JSONField`/`Decimal` usage), and SQLite's looser type affinity and different `JSONField`
@@ -168,8 +163,7 @@ class of "works in tests, breaks in prod" surprises.
 
 ---
 
-Autonomous-session decisions made while implementing **Concern 2 (fulfillment engine)** —
-`django_licensing/engine.py` and `django_licensing/providers.py`. Same rules as above: dilemma,
+Autonomous-session decisions made while implementing **Concern 2 (fulfillment engine)**. Same rules as above: dilemma,
 decision, reason, cost to revisit.
 
 ## 10. `Wallet.wallet_type` (grant/consumable) does not change *how* consumption works — only draw
@@ -412,9 +406,9 @@ existing behaviour, since today's behaviour (nothing implicit happens) is a stri
 
 Autonomous-session decision made while wiring the library into its first real consumer, **KlubIS**
 (`klubis-novi`, see its `CLAUDE.md` poglavje 3/4 for the "reusable module + setup module" pattern).
-Found by running KlubIS's full backend test suite after adding `django_licensing` to its
-`TENANT_APPS` (schema-per-tenant, `django-tenants`) — not a KlubIS-specific concern, so recorded
-here rather than only in KlubIS's own decision log.
+Found by running a consumer application's full backend test suite after adding `allowances_django` to its
+`TENANT_APPS` (schema-per-tenant, `django-tenants`) — not a consumer-specific concern, so recorded
+here rather than only in its own decision log.
 
 ## 19. `ContentType` foreign keys use `db_constraint=False`
 
@@ -426,16 +420,16 @@ DB-enforced constraint. That is fine for a single-schema host application, but b
 schema-per-tenant one (`django-tenants` and equivalents): `django.contrib.contenttypes` conventionally
 stays a single shared table (Django's own recommendation, and this app's own `Wallet.subject` needs
 exactly one global `ContentType` catalogue regardless of which schema a subject's own table lives in),
-while a per-tenant host installs `django_licensing` itself once per tenant schema, because a wallet's
+while a per-tenant host installs `allowances_django` itself once per tenant schema, because a wallet's
 *subject* (a member, a device, ...) is itself tenant-scoped data. The result: N tenant schemas each get
 their own `wallet`/`transaction`/... tables, all real-FK'd to the *one* shared `content_type` table.
 Postgres accepts creating such cross-schema FKs without complaint, but then refuses to `TRUNCATE` the
 shared table at all — `FeatureNotSupported: cannot truncate a table referenced in a foreign key
-constraint` — the instant a second schema exists with so much as an empty `django_licensing_wallet`
-table, regardless of whether it holds any rows. This is exactly what KlubIS's test suite hit: any
+constraint` — the instant a second schema exists with so much as an empty `allowances_django_wallet`
+table, regardless of whether it holds any rows. This is exactly what the test suite hit: any
 `transaction=True` test that flushes the `public` schema (i.e. any test of a `SHARED_APPS` model, e.g.
 `users`, `clubs`, `competitions`) started failing at teardown the moment the first tenant schema with
-`django_licensing` migrated into it existed for the session — over a thousand cascading errors from one
+`allowances_django` migrated into it existed for the session — over a thousand cascading errors from one
 root cause.
 
 **Decision:** All four `ForeignKey(ContentType, ...)` fields now pass `db_constraint=False`. The
@@ -462,3 +456,197 @@ real FK's behaviour. **Medium for any already-deployed consumer with existing da
 installed this app in a single-schema layout and has come to rely on `ON DELETE CASCADE`/`SET NULL`
 actually running at the database level (e.g. bulk-deleting rows through raw SQL that bypasses the ORM)
 would need to re-verify that assumption. No such consumer exists yet (KlubIS is the first).
+
+---
+
+# Concern 4 — ORM decoupling
+
+Entries 20 onward were made while splitting the library into a dependency-free core plus a Django
+storage backend. Everything above this line describes the initial design; where
+the two disagree, these entries win.
+
+## 20. Package name: `allowances`
+
+**Dilemma:** The package needs a name that is precise yet not already taken on PyPI. Both of
+the obvious candidates — `licensing` and `billing` — are taken (`licensing` 0.54,
+`billing` 0.0.1). `entitlements` is free and is the most precise term of art, but reads as corporate
+jargon. And "billing" actively misdescribes the library: there are no invoices, no payments and no
+money anywhere in it, so the name would have people looking for a Stripe integration that will never
+exist.
+
+**Decision:** `allowances`. Bare `allowance` (singular) is taken — a real package with six releases,
+not a squat — so the plural it is. `allowances-django` and `django-allowances` were both checked and
+reserved conceptually in case the distribution is ever split.
+
+**Reason:** "Allowance" in English means *a permitted quantity* (baggage allowance, tax allowance),
+which covers both halves of what the library does — the boolean grant and the consumable budget —
+without the corporate register of "entitlement". It is an everyday word, which matters for a term
+that will appear in every call site.
+
+**Cost to revisit:** High once published. Free until then. Renaming again means another table-prefix
+migration for every consumer.
+
+## 21. One distribution with an optional extra, not two distributions
+
+**Dilemma:** A "pure core plus adapter" split naturally suggests two packages (`allowances` and
+`allowances-django`), which is what most libraries of this shape do.
+
+**Decision:** One distribution, `allowances`, shipping two importable packages — `allowances`
+(no dependencies) and `allowances_django` (needs Django) — with Django behind the `[django]` extra.
+
+**Reason:** `pip install allowances` still pulls in nothing, and `import allowances` still imports no
+framework, so the property that actually mattered is preserved. What is avoided is a second
+`pyproject.toml`, a second release process, and a version-compatibility matrix between two packages
+that will always be released together. The only cost is that `allowances_django` is present on disk
+even when Django is not installed, where it simply fails to import.
+
+**Cost to revisit:** Low. Splitting later is a packaging change, not a code change — the module
+boundary is already where the distribution boundary would go.
+
+## 22. Subjects are two `CharField`s, not a `GenericForeignKey`
+
+**Dilemma:** The core cannot import Django, so it cannot hold a `ContentType` foreign key. The
+question was whether to keep `ContentType` in the Django backend and translate at the boundary, or
+drop it from the schema entirely.
+
+**Decision:** Dropped entirely. `subject_type` holds `"app_label.modelname"` and `subject_id` holds
+the primary key as text. `allowances_django.subjects` converts model instances to
+`SubjectRef` and back.
+
+**Reason:** Three wins beyond the decoupling. Subjects keyed by UUID or slug now work, which the old
+`PositiveBigIntegerField` object id ruled out. Decision #19's entire `db_constraint=False` workaround
+disappears along with the cross-schema `TRUNCATE` failure that forced it — there is no longer a
+foreign key to the shared table to break. And a schema-per-tenant deployment no longer has to care
+where `django_content_type` lives.
+
+The cost is real but small: `select_related` cannot follow a subject, and a dangling reference is not
+caught by the database. `resolve()` returns `None` for a deleted subject rather than raising, so
+admin and reporting can render an orphaned row instead of failing on it.
+
+**Cost to revisit:** High for a consumer with data — it is a full data migration of every wallet,
+transaction and modifier row. Zero for a new installation.
+
+## 23. `fulfillment_order` callables receive a list, not a QuerySet
+
+**Dilemma:** The one genuinely breaking change in the public configuration API. The callable form
+previously received a Django `QuerySet` and was expected to call `.order_by()` on it, which is
+unimplementable on any non-ORM backend.
+
+**Decision:** It receives `list[Wallet]` — the core's frozen value objects — and returns them in draw
+order. It may filter as well as order.
+
+**Reason:** There is no way to keep the QuerySet contract and have the abstraction mean anything; an
+ordering function that only works against one backend defeats the purpose of the port. Taken now
+while the only existing implementation is this repo's own test fixture, the change costs one
+`sorted()` call per consumer. A year from now it would be a deprecation cycle.
+
+A side benefit: a custom ordering is now unit-testable without a database.
+
+**Cost to revisit:** Low. Passing a lazily-evaluated wrapper instead of a list would be a compatible
+extension if the eager `list()` ever becomes a performance problem.
+
+## 24. Locking `unfulfill` at the record, not just the rows
+
+**Dilemma:** The pre-split `unfulfill` computed "which transactions are not yet stornoed" as a
+subquery *inside* the locking query, so Postgres re-evaluated it after unblocking. The ported version
+computes that set in Python from a separate read, which reintroduces a race: two concurrent reversals
+could each read the same not-yet-stornoed set and each write a refund.
+
+**Decision:** `unfulfill` takes an exclusive lock on the fulfillment record itself
+(`get_record(guid, lock=True)`) before reading its transactions, which serialises concurrent
+reversals of the same record.
+
+**Reason:** It preserves the original guarantee using a primitive every backend can implement, rather
+than one that only exists in SQL. The unique constraint on `storno_of` remains as the backstop: if
+the lock is ever wrong, the second reversal raises an integrity error rather than silently refunding
+twice.
+
+**Cost to revisit:** Low — it is one extra locked read per reversal, on a path that is not hot.
+
+## 25. Unknown guids raise instead of silently doing nothing
+
+**Dilemma:** `attach` and `unfulfill` previously raised `FulfillmentRecord.DoesNotExist` for a guid
+that was never fulfilled under. The core cannot raise a Django exception, and the ported code
+initially just returned.
+
+**Decision:** A new `RecordNotFoundError`, raised by both. It subclasses `LookupError`, so a
+consumer transitioning from the Django exception can catch `LookupError` and cover both.
+
+**Reason:** `unfulfill` is documented as idempotent, but that means "reversing an already-reversed
+record is a no-op" — not "a guid nobody has ever heard of is fine". The second case means the caller
+has lost track of which operation it was undoing, and swallowing it hides the bug.
+
+**Cost to revisit:** Low.
+
+## 26. `created_at` is `default=timezone.now`, not `auto_now_add`
+
+**Dilemma:** The engine threads an `at` parameter through every call, but `auto_now_add` ignored it,
+so a transaction always got the real wall clock. Sliding-window behaviour was therefore only testable
+by actually waiting, or by patching rows after the fact — which the pre-split test suite did.
+
+**Decision:** Wallets and transactions use `default=timezone.now`, and the store passes `at` through
+when given.
+
+**Reason:** It makes `at=` mean the same thing end to end, which is what a caller reading the
+signature would assume. It also makes backfilling history at real timestamps possible, and removes
+the `backdate()` helper the old tests needed.
+
+**Cost to revisit:** Low, but note the tradeoff taken: a caller can now write a transaction at a
+timestamp of their choosing, including a wrong one. The ledger trusts its caller about time.
+
+## 27. The test suite runs every engine test against both backends
+
+**Dilemma:** With two store implementations, a bug in either is invisible until something exercises
+it, and duplicating ~1400 lines of tests per backend is not maintainable.
+
+**Decision:** One engine test suite, parametrised over `MemoryStore` and `DjangoStore` via the
+`store` fixture. Backend-specific behaviour (reference conversion, shortcuts, database constraints,
+archive tables) lives in `tests/django/`.
+
+**Reason:** Any behavioural difference between the two backends now fails a test by construction —
+which is the only way the port stays honest. It also means a third-party backend can be verified by
+adding one parameter to that fixture.
+
+One trap found while doing it, worth recording: the `django` parameter must carry
+`pytest.mark.django_db` via `pytest.param(..., marks=...)`. Requesting the `db` fixture from inside
+the fixture *body* (`request.getfixturevalue("db")`) is too late — pytest-django decides whether to
+set up a test database while collecting markers, so the blocker stays disarmed and the writes land in
+the **development** database instead. Silently, and green.
+
+**Cost to revisit:** Low.
+
+## 28. Archival is a store responsibility; the core never names an archive type
+
+**Dilemma:** `WalletArchive`/`TransactionArchive` are relational tables. Hoisting them into the core
+as value types would impose one archive shape on every backend.
+
+**Decision:** The port has `archive_wallet(wallet)` and nothing else. The core decides *when* to
+archive; what an archive is, and whether one exists at all, is entirely the backend's business.
+
+**Reason:** A backend with no meaningful archive (a cache-shaped one) can raise
+`UnsupportedOperationError` rather than being forced to fake a shape it does not have. Reading
+archives is likewise backend-specific and stays out of the portable API.
+
+**Cost to revisit:** Medium if a cross-backend archive-reading API is ever wanted — it would mean
+adding value types and read methods to the port that only some backends can serve.
+
+## 29. The supported Django window is 5.2 through 6.x, and CI proves it
+
+**Dilemma:** The supported Django versions should be verified in CI. Django 5.1 reached end of life in December 2025.
+
+**Decision:** `Django>=5.2,<7`, with a GitHub Actions matrix that runs the whole suite against
+Django 5.2 (Python 3.11), 6.0 (3.12) and 6.1 (3.13), each against a real Postgres service.
+
+**Reason:** The floor is a support policy, not a technical constraint — the adapter's newest API is
+`JSONField` (Django 3.1), and `UniqueConstraint(condition=…)` and `select_for_update()` are older
+still. So the floor may as well be the current LTS, and anything below it is untested rather than
+merely old. The ceiling is the opposite problem: `<7` is a promise, and a promise about a version
+nobody has run is worth nothing. The matrix is what converts it into a fact.
+
+Note the interaction with `requires-python = ">=3.11"`: Django 6.0 and later require Python 3.12,
+so an installation on 3.11 resolves to 5.2 no matter what the ceiling says. That is why the matrix
+pairs each Django with the oldest Python that can run it — dropping 3.11 from the project would buy
+nothing until the floor itself moves to 6.x.
+
+**Cost to revisit:** Low. Raising the floor is one line here and one row in the matrix; raising the
+ceiling means adding a row and watching it go green first.

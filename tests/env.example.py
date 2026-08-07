@@ -1,16 +1,16 @@
 """
-Template for `tests/env.py` — a per-developer, gitignored file holding real local Postgres
-credentials for running the test suite. Copy this file to `tests/env.py` and fill in the values
-for your machine (see CLAUDE.md-style convention this mirrors, used across the author's other
-Django projects: secrets never go in git, only their shape does).
+Copy to ``tests/env.py`` (gitignored) and fill in local Postgres credentials.
+
+Postgres rather than SQLite because the suite exercises ``select_for_update`` and partial unique
+constraints, neither of which SQLite implements the way the library relies on.
 """
 
 DATABASE = dict(
     ENGINE="django.db.backends.postgresql",
-    NAME="django_licensing",
-    USER="klubis",
-    PASSWORD="changeme",
+    NAME="allowances",
+    USER="postgres",
+    PASSWORD="",
     HOST="localhost",
     PORT=5432,
-    TEST=dict(NAME="test_django_licensing"),
+    TEST=dict(NAME="test_allowances"),
 )

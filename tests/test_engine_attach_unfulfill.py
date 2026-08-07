@@ -1,140 +1,128 @@
+"""``attach`` and ``unfulfill`` — closing the loop after a fulfillment, and undoing one."""
+
+import uuid
+
 from decimal import Decimal
 
 import pytest
 
-from django.contrib.auth.models import User
-from django.contrib.contenttypes.models import ContentType
-from django.db import IntegrityError, transaction as db_transaction
+from allowances.engine import attach, fulfill, unfulfill
+from allowances.errors import RecordNotFoundError
+from allowances.types import ObjectRef, TransactionKind
+from tests.conftest import open_wallet
+from tests.helpers import transactions_for_wallet
 
-from django_licensing.engine import attach, fulfill, unfulfill
-from django_licensing.models import FulfillmentRecord, Transaction, TransactionKind, Wallet, WalletType
-from django_licensing.providers import SettingsProvider
-
-pytestmark = pytest.mark.django_db
-
-
-@pytest.fixture
-def alice():
-    return User.objects.create(username="alice")
+EMAIL = ObjectRef("mail.message", 1001)
+OTHER_EMAIL = ObjectRef("mail.message", 2002)
 
 
-@pytest.fixture
-def business_object():
-    return User.objects.create(username="business-object-stand-in")
+def test_attach_marks_every_transaction_under_the_guid(store, alice, provider):
+    open_wallet(store, alice, balance="10")
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
+
+    attach(store, result.guid, EMAIL)
+
+    attached = store.transactions_for_record(record_guid=result.guid)
+    assert [t.obj for t in attached] == [EMAIL]
 
 
-@pytest.fixture
-def provider():
-    return SettingsProvider(
-        config={
-            "features": {
-                "send_email": {
-                    "consumable": {"currencies": ["credits"]},
-                    "subjects": {"device"},
-                    "fulfillment_order": [("consumable", "device")],
-                }
-            },
-            "currencies": {"credits": {"general": True, "round_fn": None}},
-        }
-    )
-
-
-def test_attach_sets_object_on_all_transactions_under_guid(alice, business_object, provider):
-    Wallet.objects.create(subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10"))
-    result = fulfill("send_email", 3, {"device": alice}, provider=provider)
-
-    attach(result.guid, business_object)
-
-    txn = Transaction.objects.get(pk=result.transactions[0].pk)
-    assert txn.attached_object == business_object
-    assert txn.object_content_type == ContentType.objects.get_for_model(business_object)
-    assert txn.object_id == business_object.pk
-
-
-def test_attach_is_fifo_by_timestamp_across_multiple_fulfill_calls(alice, business_object, provider):
-    import uuid
-
+def test_attach_spans_several_fulfill_calls_sharing_one_guid(store, alice, provider):
+    open_wallet(store, alice, balance="100")
     guid = uuid.uuid4()
-    Wallet.objects.create(subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("100"))
-    first = fulfill("send_email", 2, {"device": alice}, guid=guid, provider=provider)
-    second = fulfill("send_email", 3, {"device": alice}, guid=guid, provider=provider)
+    fulfill(store, "send_email", 2, {"device": alice}, provider, guid=guid)
+    fulfill(store, "send_email", 3, {"device": alice}, provider, guid=guid)
 
-    attach(guid, business_object)
+    attach(store, guid, EMAIL)
 
-    for txn_id in (first.transactions[0].pk, second.transactions[0].pk):
-        txn = Transaction.objects.get(pk=txn_id)
-        assert txn.attached_object == business_object
+    assert all(t.obj == EMAIL for t in store.transactions_for_record(record_guid=guid))
 
 
-def test_attach_leaves_already_attached_transactions_untouched(alice, provider):
-    other_object = User.objects.create(username="other")
-    Wallet.objects.create(subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10"))
-    result = fulfill("send_email", 3, {"device": alice}, provider=provider)
-    txn = result.transactions[0]
-    attach(result.guid, other_object)
+def test_attach_leaves_already_attached_transactions_alone(store, alice, provider):
+    open_wallet(store, alice, balance="10")
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
+    attach(store, result.guid, EMAIL)
 
-    # Second attach call for the same guid should be a no-op — nothing left unattached.
-    attach(result.guid, alice)
+    attach(store, result.guid, OTHER_EMAIL)
 
-    txn.refresh_from_db()
-    assert txn.attached_object == other_object
+    assert [t.obj for t in store.transactions_for_record(record_guid=result.guid)] == [EMAIL]
 
 
-def test_unfulfill_reverses_all_transactions_under_guid(alice, provider):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
+def test_attach_on_an_unknown_guid_raises(store):
+    with pytest.raises(RecordNotFoundError):
+        attach(store, uuid.uuid4(), EMAIL)
+
+
+def test_unfulfill_gives_the_balance_back(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
+    assert store.get_wallet(wallet.id).balance == Decimal("7")
+
+    unfulfill(store, result.guid)
+
+    assert store.get_wallet(wallet.id).balance == Decimal("10")
+    storno = [t for t in transactions_for_wallet(store, wallet.id) if t.kind == TransactionKind.STORNO]
+    assert len(storno) == 1
+    assert storno[0].storno_of_id == result.transactions[0].id
+    assert storno[0].amount == Decimal("3")
+
+
+def test_unfulfill_keeps_the_original_entry_rather_than_deleting_it(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
+
+    unfulfill(store, result.guid)
+
+    kinds = sorted(str(t.kind) for t in transactions_for_wallet(store, wallet.id))
+    assert kinds == ["consumption", "storno"]
+
+
+def test_unfulfill_is_idempotent(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
+
+    unfulfill(store, result.guid)
+    unfulfill(store, result.guid)
+
+    assert store.get_wallet(wallet.id).balance == Decimal("10")
+    storno = [t for t in transactions_for_wallet(store, wallet.id) if t.kind == TransactionKind.STORNO]
+    assert len(storno) == 1
+
+
+def test_unfulfill_reverses_every_wallet_a_request_touched(store, alice, bob):
+    from tests.conftest import CREDITS, provider_with
+
+    first = open_wallet(store, alice, balance="2", overdraft_limit=Decimal("0"))
+    second = open_wallet(store, bob, balance="5")
+    provider = provider_with(
+        features={
+            "send_email": {
+                "consumable": {"currencies": ["credits"]},
+                "subjects": {"device", "team"},
+                "fulfillment_order": [("consumable", "device"), ("consumable", "team")],
+            }
+        },
+        currencies=CREDITS,
     )
-    result = fulfill("send_email", 3, {"device": alice}, provider=provider)
+    result = fulfill(store, "send_email", 4, {"device": alice, "team": bob}, provider)
 
-    unfulfill(result.guid)
+    unfulfill(store, result.guid)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("10")
-    storno = Transaction.objects.get(kind=TransactionKind.STORNO)
-    assert storno.storno_of_id == result.transactions[0].pk
-    assert storno.amount == Decimal("3")
+    assert store.get_wallet(first.id).balance == Decimal("2")
+    assert store.get_wallet(second.id).balance == Decimal("5")
 
 
-def test_unfulfill_is_idempotent(alice, provider):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
-    result = fulfill("send_email", 3, {"device": alice}, provider=provider)
-
-    unfulfill(result.guid)
-    unfulfill(result.guid)  # must not raise, must not double-reverse
-
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("10")
-    assert Transaction.objects.filter(kind=TransactionKind.STORNO).count() == 1
+def test_unfulfill_on_an_unknown_guid_raises(store):
+    with pytest.raises(RecordNotFoundError):
+        unfulfill(store, uuid.uuid4())
 
 
-def test_unfulfill_respects_storno_of_uniqueness_constraint_at_db_level(alice, provider):
-    Wallet.objects.create(subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10"))
-    result = fulfill("send_email", 3, {"device": alice}, provider=provider)
-    original = result.transactions[0]
+def test_unfulfill_skips_transactions_whose_wallet_was_archived(store, alice, provider):
+    # Drained to exactly zero, so the wallet is archived on the spot and there is nothing left to
+    # credit back. The call must still succeed rather than fail on the missing wallet.
+    wallet = open_wallet(store, alice, balance="3")
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
+    assert store.get_wallet(wallet.id) is None
 
-    unfulfill(result.guid)
+    unfulfill(store, result.guid)
 
-    with pytest.raises(IntegrityError):
-        with db_transaction.atomic():
-            Transaction.objects.create(
-                wallet_id=original.wallet_id,
-                kind=TransactionKind.STORNO,
-                amount=Decimal("3"),
-                storno_of=original,
-            )
-
-
-def test_unfulfill_unknown_guid_raises_does_not_exist():
-    import uuid
-
-    with pytest.raises(FulfillmentRecord.DoesNotExist):
-        unfulfill(uuid.uuid4())
-
-
-def test_attach_unknown_guid_raises_does_not_exist(alice):
-    import uuid
-
-    with pytest.raises(FulfillmentRecord.DoesNotExist):
-        attach(uuid.uuid4(), alice)
+    assert store.transactions_for_record(record_guid=result.guid) == []

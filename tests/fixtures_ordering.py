@@ -1,11 +1,13 @@
 """
-A trivial custom fulfillment-order callable, used to exercise the README's dotted-string callable
-form of ``fulfillment_order`` ("a callable that receives a QuerySet of candidate wallets and
-returns it ordered"). Kept as a real importable module (not an inline test function) since
-``django.utils.module_loading.import_string`` needs a dotted path that actually resolves.
+A custom ``fulfillment_order`` callable, kept as a real importable module because the dotted-string
+form has to resolve to something.
+
+Note the signature: it receives a plain ``list[Wallet]``, not a database query. That is what makes
+a custom ordering portable — the same function works whether the wallets came out of Postgres or a
+dict.
 """
 
 
-def order_wallets(queryset):
-    """Orders candidate wallets balance descending — drain the fattest wallet first."""
-    return queryset.order_by("-balance", "id")
+def order_wallets(wallets):
+    """Drain the fattest wallet first."""
+    return sorted(wallets, key=lambda w: (-w.balance, w.id))

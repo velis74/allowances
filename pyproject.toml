@@ -1,21 +1,26 @@
 [project]
-name = "django-licensing"
+name = "allowances"
 version = "0.1.0"
-description = "Flexible, extensible licensing and entitlement management for Django applications."
+description = "Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend."
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [
-    "Django>=5.1,<6",
-]
+license = "MIT"
+keywords = ["licensing", "entitlements", "quota", "metering", "billing", "ledger", "django"]
+# The core has no dependencies at all. `import allowances` pulls in nothing but the standard library.
+dependencies = []
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-django", "psycopg2-binary", "coverage"]
+# Floor: 5.2, the current LTS — 5.1 reached end of life in December 2025 and nothing here needs an
+# API newer than Django 3.1 anyway. Ceiling: the 6.x series, tested against 6.0 and 6.1 in CI.
+django = ["Django>=5.2,<7"]
+test = ["pytest", "pytest-django", "psycopg2-binary", "coverage", "Django>=5.2,<7"]
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["django_licensing*"]
+include = ["allowances*", "allowances_django*"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
@@ -24,7 +29,9 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-exclude = ["*/migrations/*"]
+# Markdown is excluded because ruff formats Python blocks embedded in it, and documentation snippets
+# are wrapped for reading rather than to a formatter's line budget.
+exclude = ["*/migrations/*", "*.md", "node_modules"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
@@ -43,3 +50,10 @@ case-sensitive = false
 lines-between-types = 1
 combine-as-imports = true
 order-by-type = false
+
+[tool.coverage.run]
+source = ["allowances", "allowances_django"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true

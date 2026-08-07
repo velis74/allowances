@@ -1,49 +1,26 @@
+"""``fulfill`` — the ordering walk, conversion rates, rounding, overdraft, modifiers, atomicity."""
+
+import uuid
+
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 
-from django.contrib.auth.models import User
-
-from django_licensing.engine import fulfill, InsufficientBalanceError
-from django_licensing.models import Transaction, TransactionKind, Wallet, WalletType
-from django_licensing.providers import SettingsProvider
-
-pytestmark = pytest.mark.django_db
-
-
-@pytest.fixture
-def alice():
-    return User.objects.create(username="alice")
+from allowances.engine import fulfill
+from allowances.errors import InsufficientBalanceError
+from allowances.types import TransactionKind, WalletType
+from allowances.windows import utcnow
+from tests.conftest import CREDITS, open_wallet, provider_with
+from tests.helpers import add_modifier, transaction_count
 
 
-@pytest.fixture
-def bob():
-    return User.objects.create(username="bob")
+def test_draws_from_a_single_wallet(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
 
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider)
 
-def provider_with(features, currencies):
-    return SettingsProvider(config={"features": features, "currencies": currencies})
-
-
-def test_fulfill_single_wallet_single_currency(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
-    provider = provider_with(
-        features={
-            "send_email": {
-                "consumable": {"currencies": ["credits"]},
-                "subjects": {"user"},
-                "fulfillment_order": [("consumable", "user")],
-            }
-        },
-        currencies={"credits": {"general": True, "round_fn": None}},
-    )
-
-    result = fulfill("send_email", 3, {"user": alice}, provider=provider)
-
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("7")
+    assert store.get_wallet(wallet.id).balance == Decimal("7")
     assert result.requested == Decimal("3")
     assert result.granted == Decimal("3")
     assert result.satisfied is True
@@ -53,22 +30,14 @@ def test_fulfill_single_wallet_single_currency(alice):
     assert txn.kind == TransactionKind.CONSUMPTION
     assert txn.amount == Decimal("-3")
     assert txn.wallet_id == wallet.id
-    assert txn.fulfillment_record.guid == result.guid
+    assert txn.record_guid == result.guid
 
 
-def test_fulfill_walks_fulfillment_order_grant_before_consumable(alice, bob):
-    # overdraft_limit=0 (not None) keeps this wallet out of the "drained -> archive" trigger so the
-    # test can inspect it via refresh_from_db() after being drawn down to exactly zero.
-    grant_wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.GRANT,
-        currency="credits",
-        balance=Decimal("2"),
-        overdraft_limit=Decimal("0"),
-    )
-    consumable_wallet = Wallet.objects.create(
-        subject=bob, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("5")
-    )
+def test_walks_fulfillment_order_steps_in_declared_sequence(store, alice, bob):
+    # An explicit overdraft_limit of 0 keeps this wallet out of the drained-to-zero archive trigger,
+    # so the test can still read its balance back afterwards.
+    grant = open_wallet(store, alice, wallet_type=WalletType.GRANT, balance="2", overdraft_limit=Decimal("0"))
+    consumable = open_wallet(store, bob, balance="5")
     provider = provider_with(
         features={
             "send_email": {
@@ -78,36 +47,23 @@ def test_fulfill_walks_fulfillment_order_grant_before_consumable(alice, bob):
                 "fulfillment_order": [("grant", "device"), ("consumable", "team")],
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("send_email", 4, {"device": alice, "team": bob}, provider=provider)
+    result = fulfill(store, "send_email", 4, {"device": alice, "team": bob}, provider)
 
-    grant_wallet.refresh_from_db()
-    consumable_wallet.refresh_from_db()
-    assert grant_wallet.balance == Decimal("0")
-    assert consumable_wallet.balance == Decimal("3")
-    assert result.granted == Decimal("4")
+    assert store.get_wallet(grant.id).balance == Decimal("0")
+    assert store.get_wallet(consumable.id).balance == Decimal("3")
     assert result.satisfied is True
-    assert len(result.transactions) == 2
-    assert result.transactions[0].wallet_id == grant_wallet.id
-    assert result.transactions[0].amount == Decimal("-2")
-    assert result.transactions[1].wallet_id == consumable_wallet.id
-    assert result.transactions[1].amount == Decimal("-2")
+    assert [(t.wallet_id, t.amount) for t in result.transactions] == [
+        (grant.id, Decimal("-2")),
+        (consumable.id, Decimal("-2")),
+    ]
 
 
-def test_fulfill_wildcard_subject_walks_subjects_in_order(alice, bob):
-    # overdraft_limit=0 (not None) keeps this wallet out of the "drained -> archive" trigger.
-    wallet_a = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.GRANT,
-        currency="credits",
-        balance=Decimal("2"),
-        overdraft_limit=Decimal("0"),
-    )
-    wallet_b = Wallet.objects.create(
-        subject=bob, wallet_type=WalletType.GRANT, currency="credits", balance=Decimal("5")
-    )
+def test_a_wildcard_subject_step_walks_every_subject_in_order(store, alice, bob):
+    first = open_wallet(store, alice, wallet_type=WalletType.GRANT, balance="2", overdraft_limit=Decimal("0"))
+    second = open_wallet(store, bob, wallet_type=WalletType.GRANT, balance="5")
     provider = provider_with(
         features={
             "send_email": {
@@ -116,45 +72,57 @@ def test_fulfill_wildcard_subject_walks_subjects_in_order(alice, bob):
                 "fulfillment_order": [("grant", None)],
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("send_email", 4, {"device": alice, "team": bob}, provider=provider)
+    result = fulfill(store, "send_email", 4, {"device": alice, "team": bob}, provider)
 
-    wallet_a.refresh_from_db()
-    wallet_b.refresh_from_db()
-    # alice's wallet (first in the subjects dict) is drained first, bob's covers the remainder.
-    assert wallet_a.balance == Decimal("0")
-    assert wallet_b.balance == Decimal("3")
+    # The subjects dict is walked in its own order, so alice's wallet drains first.
+    assert store.get_wallet(first.id).balance == Decimal("0")
+    assert store.get_wallet(second.id).balance == Decimal("3")
     assert result.satisfied is True
 
 
-def test_fulfill_shorthand_string_fulfillment_order_entry(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("5")
+def test_a_step_naming_an_unsupplied_subject_is_skipped_not_an_error(store, alice):
+    wallet = open_wallet(store, alice, balance="5")
+    provider = provider_with(
+        features={
+            "send_email": {
+                "consumable": {"currencies": ["credits"]},
+                "subjects": {"device", "team"},
+                "fulfillment_order": [("consumable", "team"), ("consumable", "device")],
+            }
+        },
+        currencies=CREDITS,
     )
+
+    result = fulfill(store, "send_email", 2, {"device": alice}, provider)
+
+    assert result.satisfied is True
+    assert store.get_wallet(wallet.id).balance == Decimal("3")
+
+
+def test_shorthand_string_step_matches_any_wallet_type(store, alice):
+    wallet = open_wallet(store, alice, balance="5")
     provider = provider_with(
         features={
             "send_email": {
                 "consumable": {"currencies": ["credits"]},
                 "subjects": {"location"},
-                "fulfillment_order": ["location"],  # shorthand for (None, "location")
+                "fulfillment_order": ["location"],
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("send_email", 2, {"location": alice}, provider=provider)
+    result = fulfill(store, "send_email", 2, {"location": alice}, provider)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("3")
+    assert store.get_wallet(wallet.id).balance == Decimal("3")
     assert result.satisfied is True
 
 
-def test_fulfill_currency_conversion_rate(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
+def test_conversion_rate_multiplies_the_cost(store, alice):
+    wallet = open_wallet(store, alice, balance="10")
     provider = provider_with(
         features={
             "coolant_fill": {
@@ -163,25 +131,20 @@ def test_fulfill_currency_conversion_rate(alice):
                 "fulfillment_order": [("consumable", "device")],
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("coolant_fill", 3, {"device": alice}, provider=provider)
+    result = fulfill(store, "coolant_fill", 3, {"device": alice}, provider)
 
-    wallet.refresh_from_db()
-    # 3 units of coolant at a rate of 2 credits/unit costs 6 credits.
-    assert wallet.balance == Decimal("4")
+    # Three units at two credits each.
+    assert store.get_wallet(wallet.id).balance == Decimal("4")
     assert result.granted == Decimal("3")
     assert result.transactions[0].amount == Decimal("-6")
 
 
-def test_fulfill_dotted_callable_fulfillment_order(alice):
-    small = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("2")
-    )
-    big = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("9")
-    )
+def test_a_callable_fulfillment_order_decides_the_sequence(store, alice):
+    small = open_wallet(store, alice, balance="2")
+    big = open_wallet(store, alice, balance="9")
     provider = provider_with(
         features={
             "send_email": {
@@ -190,27 +153,19 @@ def test_fulfill_dotted_callable_fulfillment_order(alice):
                 "fulfillment_order": "tests.fixtures_ordering.order_wallets",
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("send_email", 5, {"device": alice}, provider=provider)
+    result = fulfill(store, "send_email", 5, {"device": alice}, provider)
 
-    small.refresh_from_db()
-    big.refresh_from_db()
-    # order_wallets sorts balance descending, so the bigger wallet is drained first.
-    assert big.balance == Decimal("4")
-    assert small.balance == Decimal("2")
+    # order_wallets sorts by balance descending, so the bigger wallet goes first.
+    assert store.get_wallet(big.id).balance == Decimal("4")
+    assert store.get_wallet(small.id).balance == Decimal("2")
     assert result.satisfied is True
 
 
-def test_fulfill_overdraft_second_pass(alice):
-    wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("5"),
-        overdraft_limit=Decimal("3"),
-    )
+def test_overdraft_makes_a_second_pass_over_wallets_with_headroom(store, alice):
+    wallet = open_wallet(store, alice, balance="5", overdraft_limit=Decimal("3"))
     provider = provider_with(
         features={
             "send_email": {
@@ -220,29 +175,20 @@ def test_fulfill_overdraft_second_pass(alice):
                 "overdraft": True,
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("send_email", 7, {"device": alice}, provider=provider)
+    result = fulfill(store, "send_email", 7, {"device": alice}, provider)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("-2")
-    assert wallet.first_overdraft_at is not None
+    reloaded = store.get_wallet(wallet.id)
+    assert reloaded.balance == Decimal("-2")
+    assert reloaded.first_overdraft_at is not None
     assert result.satisfied is True
-    assert result.granted == Decimal("7")
-    assert len(result.transactions) == 2
-    assert result.transactions[0].amount == Decimal("-5")
-    assert result.transactions[1].amount == Decimal("-2")
+    assert [t.amount for t in result.transactions] == [Decimal("-5"), Decimal("-2")]
 
 
-def test_fulfill_without_overdraft_flag_does_not_dip_into_negative(alice):
-    wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("5"),
-        overdraft_limit=Decimal("3"),
-    )
+def test_without_the_overdraft_flag_a_limit_is_never_used(store, alice):
+    wallet = open_wallet(store, alice, balance="5", overdraft_limit=Decimal("3"))
     provider = provider_with(
         features={
             "send_email": {
@@ -252,135 +198,72 @@ def test_fulfill_without_overdraft_flag_does_not_dip_into_negative(alice):
                 "overdraft": False,
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies=CREDITS,
     )
 
-    result = fulfill("send_email", 7, {"device": alice}, allow_partial=True, provider=provider)
+    result = fulfill(store, "send_email", 7, {"device": alice}, provider, allow_partial=True)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("0")
+    assert store.get_wallet(wallet.id).balance == Decimal("0")
     assert result.satisfied is False
     assert result.granted == Decimal("5")
 
 
-def test_fulfill_raises_and_rolls_back_when_not_allow_partial(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("2")
-    )
-    provider = provider_with(
-        features={
-            "send_email": {
-                "consumable": {"currencies": ["credits"]},
-                "subjects": {"device"},
-                "fulfillment_order": [("consumable", "device")],
-            }
-        },
-        currencies={"credits": {"general": True, "round_fn": None}},
-    )
+def test_a_request_that_cannot_be_met_raises_and_rolls_everything_back(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="2")
 
     with pytest.raises(InsufficientBalanceError) as exc_info:
-        fulfill("send_email", 5, {"device": alice}, provider=provider)
+        fulfill(store, "send_email", 5, {"device": alice}, provider)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("2")
-    assert Transaction.objects.count() == 0
+    assert store.get_wallet(wallet.id).balance == Decimal("2")
+    assert transaction_count(store) == 0
     assert exc_info.value.result.granted == Decimal("2")
     assert exc_info.value.result.satisfied is False
 
 
-def test_fulfill_allow_partial_persists_partial_draw(alice):
-    # overdraft_limit=0 (not None) keeps this wallet out of the "drained -> archive" trigger.
-    wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("2"),
-        overdraft_limit=Decimal("0"),
-    )
-    provider = provider_with(
-        features={
-            "send_email": {
-                "consumable": {"currencies": ["credits"]},
-                "subjects": {"device"},
-                "fulfillment_order": [("consumable", "device")],
-            }
-        },
-        currencies={"credits": {"general": True, "round_fn": None}},
-    )
+def test_allow_partial_keeps_whatever_was_available(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="2", overdraft_limit=Decimal("0"))
 
-    result = fulfill("send_email", 5, {"device": alice}, allow_partial=True, provider=provider)
+    result = fulfill(store, "send_email", 5, {"device": alice}, provider, allow_partial=True)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("0")
+    assert store.get_wallet(wallet.id).balance == Decimal("0")
     assert result.satisfied is False
     assert result.granted == Decimal("2")
-    assert Transaction.objects.count() == 1
+    assert transaction_count(store) == 1
 
 
-def test_fulfill_modifier_uses_max_of_applicable_modifiers(alice):
-    from django_licensing.models import LicenseModifier
+def test_the_most_favourable_modifier_wins(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
+    add_modifier(store, subject=alice, feature="send_email", factor="0.5")
+    add_modifier(store, subject=alice, feature="send_email", factor="0.8")
 
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
-    LicenseModifier.objects.create(subject=alice, feature="send_email", factor=Decimal("0.5"))
-    LicenseModifier.objects.create(subject=alice, feature="send_email", factor=Decimal("0.8"))
-    provider = provider_with(
-        features={
-            "send_email": {
-                "consumable": {"currencies": ["credits"]},
-                "subjects": {"device"},
-                "fulfillment_order": [("consumable", "device")],
-            }
-        },
-        currencies={"credits": {"general": True, "round_fn": None}},
-    )
+    result = fulfill(store, "send_email", 5, {"device": alice}, provider)
 
-    result = fulfill("send_email", 5, {"device": alice}, provider=provider)
-
-    wallet.refresh_from_db()
-    # README: "the most favourable (max) is used" — taken literally, max(0.5, 0.8) = 0.8.
     assert result.modifier_applied == Decimal("0.8")
-    assert wallet.balance == Decimal("6")  # 10 - (5 * 0.8)
+    assert store.get_wallet(wallet.id).balance == Decimal("6")  # 10 - 5 × 0.8
 
 
-def test_fulfill_modifier_outside_validity_window_is_ignored(alice):
-    from django.utils import timezone
+def test_an_expired_modifier_is_ignored(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
+    now = utcnow()
+    add_modifier(store, subject=alice, feature="send_email", factor="0.1", valid_until=now - timedelta(days=1))
 
-    from django_licensing.models import LicenseModifier
+    result = fulfill(store, "send_email", 5, {"device": alice}, provider, at=now)
 
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
-    now = timezone.now()
-    LicenseModifier.objects.create(
-        subject=alice,
-        feature="send_email",
-        factor=Decimal("0.1"),
-        valid_until=now - timezone.timedelta(days=1),
-    )
-    provider = provider_with(
-        features={
-            "send_email": {
-                "consumable": {"currencies": ["credits"]},
-                "subjects": {"device"},
-                "fulfillment_order": [("consumable", "device")],
-            }
-        },
-        currencies={"credits": {"general": True, "round_fn": None}},
-    )
-
-    result = fulfill("send_email", 5, {"device": alice}, provider=provider, at=now)
-
-    wallet.refresh_from_db()
     assert result.modifier_applied is None
-    assert wallet.balance == Decimal("5")
+    assert store.get_wallet(wallet.id).balance == Decimal("5")
 
 
-def test_fulfill_rounding_floor(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
+def test_a_modifier_for_a_different_feature_is_ignored(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="10")
+    add_modifier(store, subject=alice, feature="something_else", factor="0.1")
+
+    fulfill(store, "send_email", 5, {"device": alice}, provider)
+
+    assert store.get_wallet(wallet.id).balance == Decimal("5")
+
+
+def test_floor_rounding_charges_less_and_grants_less(store, alice):
+    wallet = open_wallet(store, alice, balance="10")
     provider = provider_with(
         features={
             "send_email": {
@@ -392,18 +275,15 @@ def test_fulfill_rounding_floor(alice):
         currencies={"credits": {"general": True, "round_fn": "floor"}},
     )
 
-    result = fulfill("send_email", "2.7", {"device": alice}, allow_partial=True, provider=provider)
+    result = fulfill(store, "send_email", "2.7", {"device": alice}, provider, allow_partial=True)
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("8")  # floor(2.7) = 2 charged
+    assert store.get_wallet(wallet.id).balance == Decimal("8")
     assert result.granted == Decimal("2")
     assert result.satisfied is False
 
 
-def test_fulfill_rounding_ceil(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="tokens", balance=Decimal("5")
-    )
+def test_ceil_rounding_charges_a_whole_unit_for_a_fractional_cost(store, alice):
+    wallet = open_wallet(store, alice, currency="tokens", balance="5")
     provider = provider_with(
         features={
             "send_email": {
@@ -412,22 +292,19 @@ def test_fulfill_rounding_ceil(alice):
                 "fulfillment_order": [("consumable", "device")],
             }
         },
-        currencies={"tokens": {"general": False, "round_fn": "ceil"}},
+        currencies={"tokens": {"round_fn": "ceil"}},
     )
 
-    result = fulfill("send_email", 1, {"device": alice}, provider=provider)
+    result = fulfill(store, "send_email", 1, {"device": alice}, provider)
 
-    wallet.refresh_from_db()
-    # raw cost = 1 * 0.3 = 0.3, ceil -> 1 token charged.
-    assert wallet.balance == Decimal("4")
+    # A raw cost of 0.3 is charged as a full token.
+    assert store.get_wallet(wallet.id).balance == Decimal("4")
     assert result.satisfied is True
     assert result.granted == Decimal("1")
 
 
-def test_fulfill_rounding_round_half_up(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10")
-    )
+def test_half_up_rounding_charges_more_than_requested_without_granting_more(store, alice):
+    wallet = open_wallet(store, alice, balance="10")
     provider = provider_with(
         features={
             "send_email": {
@@ -439,29 +316,15 @@ def test_fulfill_rounding_round_half_up(alice):
         currencies={"credits": {"general": True, "round_fn": "round"}},
     )
 
-    result = fulfill("send_email", "2.5", {"device": alice}, provider=provider)
+    result = fulfill(store, "send_email", "2.5", {"device": alice}, provider)
 
-    wallet.refresh_from_db()
-    # raw cost = 2.5, round-half-up -> 3 credits charged, but only 2.5 units were requested.
-    assert wallet.balance == Decimal("7")
+    assert store.get_wallet(wallet.id).balance == Decimal("7")  # 2.5 rounded up to 3 charged
+    assert result.granted == Decimal("2.5")  # but only what was asked for is granted
     assert result.satisfied is True
-    assert result.granted == Decimal("2.5")
 
 
-def test_fulfill_respects_wallet_validity_window(alice):
-    from django.utils import timezone
-
-    now = timezone.now()
-    expired = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("10"),
-        valid_until=now - timezone.timedelta(days=1),
-    )
-    active = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("4")
-    )
+def test_rounding_never_pushes_a_draw_past_what_the_wallet_holds(store, alice):
+    wallet = open_wallet(store, alice, balance="2", overdraft_limit=Decimal("0"))
     provider = provider_with(
         features={
             "send_email": {
@@ -470,40 +333,72 @@ def test_fulfill_respects_wallet_validity_window(alice):
                 "fulfillment_order": [("consumable", "device")],
             }
         },
-        currencies={"credits": {"general": True, "round_fn": None}},
+        currencies={"credits": {"general": True, "round_fn": "ceil"}},
     )
 
-    result = fulfill("send_email", 3, {"device": alice}, provider=provider, at=now)
+    result = fulfill(store, "send_email", "2.5", {"device": alice}, provider, allow_partial=True)
 
-    expired.refresh_from_db()
-    active.refresh_from_db()
-    assert expired.balance == Decimal("10")  # untouched — outside its validity window
-    assert active.balance == Decimal("1")
+    # Ceiling 2.5 would charge 3 against a balance of 2 — clamped rather than overdrawn.
+    assert store.get_wallet(wallet.id).balance == Decimal("0")
+    assert result.granted == Decimal("2")
+
+
+def test_expired_wallets_are_invisible(store, alice, provider):
+    now = utcnow()
+    expired = open_wallet(store, alice, balance="10", valid_until=now - timedelta(days=1))
+    active = open_wallet(store, alice, balance="4")
+
+    result = fulfill(store, "send_email", 3, {"device": alice}, provider, at=now)
+
+    assert store.get_wallet(expired.id).balance == Decimal("10")
+    assert store.get_wallet(active.id).balance == Decimal("1")
     assert result.satisfied is True
 
 
-def test_fulfill_guid_can_be_supplied_to_group_multiple_calls(alice):
-    import uuid
+def test_wallets_not_yet_valid_are_invisible(store, alice, provider):
+    now = utcnow()
+    future = open_wallet(store, alice, balance="10", valid_from=now + timedelta(days=1))
 
-    Wallet.objects.create(subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("10"))
-    provider = provider_with(
-        features={
-            "send_email": {
-                "consumable": {"currencies": ["credits"]},
-                "subjects": {"device"},
-                "fulfillment_order": [("consumable", "device")],
-            }
-        },
-        currencies={"credits": {"general": True, "round_fn": None}},
-    )
+    with pytest.raises(InsufficientBalanceError):
+        fulfill(store, "send_email", 1, {"device": alice}, provider, at=now)
+
+    assert store.get_wallet(future.id).balance == Decimal("10")
+
+
+def test_a_wallet_in_a_currency_the_feature_does_not_accept_is_skipped(store, alice, provider):
+    other = open_wallet(store, alice, currency="coolant_liters", balance="100")
+    usable = open_wallet(store, alice, currency="credits", balance="4", overdraft_limit=Decimal("0"))
+
+    result = fulfill(store, "send_email", 4, {"device": alice}, provider)
+
+    assert store.get_wallet(other.id).balance == Decimal("100")
+    assert store.get_wallet(usable.id).balance == Decimal("0")
+    assert result.satisfied is True
+
+
+def test_a_supplied_guid_groups_several_calls_into_one_record(store, alice, provider):
+    open_wallet(store, alice, balance="10")
     guid = uuid.uuid4()
 
-    result1 = fulfill("send_email", 2, {"device": alice}, guid=guid, provider=provider)
-    result2 = fulfill("send_email", 3, {"device": alice}, guid=guid, provider=provider)
+    first = fulfill(store, "send_email", 2, {"device": alice}, provider, guid=guid)
+    second = fulfill(store, "send_email", 3, {"device": alice}, provider, guid=guid)
 
-    assert result1.guid == guid
-    assert result2.guid == guid
-    from django_licensing.models import FulfillmentRecord
+    assert first.guid == guid
+    assert second.guid == guid
+    assert len(store.transactions_for_record(record_guid=guid)) == 2
 
-    record = FulfillmentRecord.objects.get(guid=guid)
-    assert record.transactions.count() == 2
+
+def test_each_call_without_a_guid_gets_its_own_record(store, alice, provider):
+    open_wallet(store, alice, balance="10")
+
+    first = fulfill(store, "send_email", 2, {"device": alice}, provider)
+    second = fulfill(store, "send_email", 2, {"device": alice}, provider)
+
+    assert first.guid != second.guid
+
+
+def test_no_subjects_means_nothing_can_be_drawn(store, alice, provider):
+    open_wallet(store, alice, balance="10")
+
+    with pytest.raises(InsufficientBalanceError):
+        fulfill(store, "send_email", 1, {}, provider)

@@ -1,182 +1,94 @@
-from datetime import datetime, timedelta, timezone as dt_timezone
+"""Sliding-window wallets: quota that appears to reset because old consumption ages out."""
+
+from datetime import timedelta
 from decimal import Decimal
 
-import pytest
-
-from django.contrib.auth.models import User
-from django.utils import timezone
-
-from django_licensing.engine import effective_balance, fulfill, window_start
-from django_licensing.models import Transaction, TransactionKind, Wallet, WalletType
-from django_licensing.providers import SettingsProvider
-
-pytestmark = pytest.mark.django_db
+from allowances.engine import effective_balance, fulfill
+from allowances.types import TransactionKind
+from allowances.windows import utcnow
+from tests.conftest import open_wallet
+from tests.helpers import transactions_for_wallet
 
 
-@pytest.fixture
-def alice():
-    return User.objects.create(username="alice")
+def test_a_wallet_without_a_reset_config_just_reports_its_stored_balance(store, alice):
+    wallet = open_wallet(store, alice, balance="42")
+
+    assert effective_balance(store, wallet) == Decimal("42")
 
 
-def backdate(txn, when):
-    Transaction.objects.filter(pk=txn.pk).update(created_at=when)
-
-
-# -- pure window_start() tests, no DB -----------------------------------------------------------
-
-
-def test_window_start_rolling_default_is_24h():
-    at = datetime(2026, 8, 6, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({}, at)
-
-    assert start == at - timedelta(hours=24)
-
-
-def test_window_start_rolling_explicit_window_seconds():
-    at = datetime(2026, 8, 6, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"window_seconds": 3600}, at)
-
-    assert start == at - timedelta(hours=1)
-
-
-def test_window_start_daily():
-    at = datetime(2026, 8, 6, 12, 30, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"time": "00:00:00"}, at)
-
-    assert start == datetime(2026, 8, 6, 0, 0, 0, tzinfo=dt_timezone.utc)
-
-
-def test_window_start_daily_before_reset_time_uses_previous_day():
-    at = datetime(2026, 8, 6, 3, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"time": "06:00:00"}, at)
-
-    assert start == datetime(2026, 8, 5, 6, 0, 0, tzinfo=dt_timezone.utc)
-
-
-def test_window_start_weekly():
-    # 2026-08-06 is a Thursday (weekday()==3). Reset on Monday (0) at midnight.
-    at = datetime(2026, 8, 6, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"day_of_week": 0, "time": "00:00:00"}, at)
-
-    assert start == datetime(2026, 8, 3, 0, 0, 0, tzinfo=dt_timezone.utc)
-
-
-def test_window_start_weekly_before_reset_uses_previous_week():
-    # Monday 2026-08-03, before the weekly reset time of noon.
-    at = datetime(2026, 8, 3, 6, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"day_of_week": 0, "time": "12:00:00"}, at)
-
-    assert start == datetime(2026, 7, 27, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-
-def test_window_start_monthly():
-    at = datetime(2026, 8, 15, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"day_of_month": 1, "time": "00:00:00"}, at)
-
-    assert start == datetime(2026, 8, 1, 0, 0, 0, tzinfo=dt_timezone.utc)
-
-
-def test_window_start_monthly_before_reset_day_uses_previous_month():
-    at = datetime(2026, 8, 3, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-    start = window_start({"day_of_month": 15, "time": "00:00:00"}, at)
-
-    assert start == datetime(2026, 7, 15, 0, 0, 0, tzinfo=dt_timezone.utc)
-
-
-def test_window_start_monthly_clamps_to_last_day_of_shorter_month():
-    at = datetime(2026, 3, 5, 12, 0, 0, tzinfo=dt_timezone.utc)
-
-    # day_of_month=31 doesn't exist in February — clamp to Feb 28 (2026 is not a leap year).
-    start = window_start({"day_of_month": 31, "time": "00:00:00"}, at)
-
-    assert start == datetime(2026, 2, 28, 0, 0, 0, tzinfo=dt_timezone.utc)
-
-
-# -- effective_balance() against real transactions -----------------------------------------------
-
-
-def test_effective_balance_non_sliding_window_wallet_returns_stored_balance(alice):
-    wallet = Wallet.objects.create(
-        subject=alice, wallet_type=WalletType.CONSUMABLE, currency="credits", balance=Decimal("42")
+def test_a_rolling_window_ignores_consumption_that_has_aged_out(store, alice):
+    now = utcnow()
+    wallet = open_wallet(store, alice, balance="100", reset_config={"window_seconds": 86400})
+    store.create_transaction(
+        wallet_id=wallet.id, kind=TransactionKind.CONSUMPTION, amount=Decimal("-40"), at=now - timedelta(days=2)
+    )
+    store.create_transaction(
+        wallet_id=wallet.id, kind=TransactionKind.CONSUMPTION, amount=Decimal("-10"), at=now - timedelta(hours=1)
     )
 
-    assert effective_balance(wallet) == Decimal("42")
+    # Only the recent draw is still inside the 24h window.
+    assert effective_balance(store, wallet, at=now) == Decimal("90")
 
 
-def test_effective_balance_rolling_window_excludes_old_transactions(alice):
-    now = timezone.now()
-    wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("100"),
-        reset_config={"window_seconds": 86400},
+def test_a_daily_window_drops_yesterdays_consumption(store, alice):
+    now = utcnow().replace(hour=10, minute=0, second=0, microsecond=0)
+    wallet = open_wallet(store, alice, balance="200", reset_config={"time": "00:00:00"})
+    store.create_transaction(
+        wallet_id=wallet.id, kind=TransactionKind.CONSUMPTION, amount=Decimal("-150"), at=now - timedelta(hours=20)
     )
-    old_txn = Transaction.objects.create(wallet=wallet, kind=TransactionKind.CONSUMPTION, amount=Decimal("-40"))
-    backdate(old_txn, now - timedelta(days=2))
-    recent_txn = Transaction.objects.create(wallet=wallet, kind=TransactionKind.CONSUMPTION, amount=Decimal("-10"))
-    backdate(recent_txn, now - timedelta(hours=1))
-
-    balance = effective_balance(wallet, at=now)
-
-    assert balance == Decimal("90")  # 100 allotment - 10 (only the recent transaction counts)
-
-
-def test_effective_balance_daily_window_resets_at_midnight(alice):
-    now = timezone.now().replace(hour=10, minute=0, second=0, microsecond=0)
-    wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("200"),
-        reset_config={"time": "00:00:00"},
-    )
-    yesterday_txn = Transaction.objects.create(wallet=wallet, kind=TransactionKind.CONSUMPTION, amount=Decimal("-150"))
-    backdate(yesterday_txn, now - timedelta(hours=20))
-    today_txn = Transaction.objects.create(wallet=wallet, kind=TransactionKind.CONSUMPTION, amount=Decimal("-30"))
-    backdate(today_txn, now - timedelta(hours=1))
-
-    balance = effective_balance(wallet, at=now)
-
-    assert balance == Decimal("170")  # 200 - 30, yesterday's consumption already aged out
-
-
-def test_fulfill_on_sliding_window_wallet_never_decrements_stored_balance(alice):
-    wallet = Wallet.objects.create(
-        subject=alice,
-        wallet_type=WalletType.CONSUMABLE,
-        currency="credits",
-        balance=Decimal("100"),
-        reset_config={"window_seconds": 86400},
-    )
-    provider = SettingsProvider(
-        config={
-            "features": {
-                "send_email": {
-                    "consumable": {"currencies": ["credits"]},
-                    "subjects": {"device"},
-                    "fulfillment_order": [("consumable", "device")],
-                }
-            },
-            "currencies": {"credits": {"general": True, "round_fn": None}},
-        }
+    store.create_transaction(
+        wallet_id=wallet.id, kind=TransactionKind.CONSUMPTION, amount=Decimal("-30"), at=now - timedelta(hours=1)
     )
 
-    result = fulfill("send_email", 30, {"device": alice}, provider=provider)
+    assert effective_balance(store, wallet, at=now) == Decimal("170")
 
-    wallet.refresh_from_db()
-    assert wallet.balance == Decimal("100")  # allotment untouched
+
+def test_fulfilling_from_a_windowed_wallet_never_moves_its_stored_balance(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="100", reset_config={"window_seconds": 86400})
+
+    result = fulfill(store, "send_email", 30, {"device": alice}, provider)
+
+    assert store.get_wallet(wallet.id).balance == Decimal("100")  # the allotment is a constant
     assert result.satisfied is True
-    assert Transaction.objects.filter(wallet=wallet).count() == 1
+    assert len(transactions_for_wallet(store, wallet.id)) == 1
 
-    # A second, later fulfill within the same window sees the reduced effective balance.
-    second = fulfill("send_email", 80, {"device": alice}, provider=provider, allow_partial=True)
-    assert second.granted == Decimal("70")  # 100 - 30 already consumed this window
+
+def test_a_second_call_in_the_same_window_sees_the_reduced_balance(store, alice, provider):
+    open_wallet(store, alice, balance="100", reset_config={"window_seconds": 86400})
+    fulfill(store, "send_email", 30, {"device": alice}, provider)
+
+    second = fulfill(store, "send_email", 80, {"device": alice}, provider, allow_partial=True)
+
+    assert second.granted == Decimal("70")
+
+
+def test_the_quota_is_whole_again_once_the_window_has_passed(store, alice, provider):
+    now = utcnow()
+    open_wallet(store, alice, balance="100", reset_config={"window_seconds": 3600})
+    fulfill(store, "send_email", 100, {"device": alice}, provider, at=now - timedelta(hours=2))
+
+    result = fulfill(store, "send_email", 100, {"device": alice}, provider, at=now)
+
+    assert result.satisfied is True
+
+
+def test_a_windowed_wallet_is_never_archived_for_being_spent_out(store, alice, provider):
+    wallet = open_wallet(store, alice, balance="5", reset_config={"window_seconds": 86400})
+
+    fulfill(store, "send_email", 5, {"device": alice}, provider)
+
+    assert store.get_wallet(wallet.id) is not None
+
+
+def test_a_reversal_inside_the_window_restores_the_windowed_balance(store, alice, provider):
+    from allowances.engine import unfulfill
+
+    wallet = open_wallet(store, alice, balance="100", reset_config={"window_seconds": 86400})
+    result = fulfill(store, "send_email", 30, {"device": alice}, provider)
+    assert effective_balance(store, store.get_wallet(wallet.id)) == Decimal("70")
+
+    unfulfill(store, result.guid)
+
+    # The storno lands inside the same window and nets the consumption back out.
+    assert effective_balance(store, store.get_wallet(wallet.id)) == Decimal("100")
+    assert store.get_wallet(wallet.id).balance == Decimal("100")
