@@ -1,6 +1,6 @@
 [project]
 name = "allowances"
-version = "0.1.0"
+version = "0.2.0"
 description = "Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend."
 readme = "README.md"
 requires-python = ">=3.11"
