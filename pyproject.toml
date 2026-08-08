@@ -9,6 +9,15 @@ keywords = ["licensing", "entitlements", "quota", "metering", "billing", "ledger
 # The core has no dependencies at all. `import allowances` pulls in nothing but the standard library.
 dependencies = []
 
+[project.urls]
+# PyPI renders these in the sidebar, and gives Homepage/Documentation/Source/Issues their own icons
+# when named exactly like this. Without them the only way off the project page is the README's own
+# links, which is what this section exists to fix.
+Homepage = "https://github.com/velis74/allowances"
+Documentation = "https://docs.velis.si/allowances"
+Source = "https://github.com/velis74/allowances"
+Issues = "https://github.com/velis74/allowances/issues"
+
 [project.optional-dependencies]
 # Floor: 5.2, the current LTS — 5.1 reached end of life in December 2025 and nothing here needs an
 # API newer than Django 3.1 anyway. Ceiling: the 6.x series, tested against 6.0 and 6.1 in CI.
