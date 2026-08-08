@@ -68,12 +68,38 @@ resolve(SubjectRef(wallet.subject_type, wallet.subject_id))  # instance, or None
 
 ## Concurrency
 
-`unit_of_work()` is `transaction.atomic()`. `lock=True` is `select_for_update()`.
+`unit_of_work()` is `transaction.atomic()`. `lock=True` is `select_for_update()` where the database has it.
 
 `fulfill` locks every candidate wallet for the duration, so two simultaneous calls against the same wallet serialise rather than both spending the same balance. `unfulfill` locks the fulfillment record itself — locking only the rows would let two concurrent reversals each read the same not-yet-stornoed set. The unique constraint on `storno_of` is the backstop if that ever fails.
 
-::: warning Postgres
-Tested against Postgres. `select_for_update` and partial unique constraints both need to behave properly, and SQLite doesn't implement either the way this relies on. It will appear to work in development and lose a race in production.
+## SQLite
+
+Supported, and tested the same way Postgres is — the concurrency suite in `tests/django/test_concurrency.py` runs on both and passes on both. Eight threads racing for the same wallet, released from a barrier together, get the balance granted exactly once.
+
+It reaches that result by a different route. SQLite has no `SELECT ... FOR UPDATE` and never will, because it has nothing finer to offer than the single write lock it holds over the whole database. `lock=True` therefore compiles to a plain select there, and the guarantee the engine actually needs — that no second unit of work reads a balance this one is about to change — comes from the write lock covering the entire transaction instead. Coarser than row locking, and strictly stronger.
+
+That only holds if the transaction takes the write lock when it opens rather than when it first writes, which is one line of configuration:
+
+```python
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {
+            "transaction_mode": "IMMEDIATE",          # take the write lock at BEGIN
+            "timeout": 20,                            # ...and wait that long for it
+            "init_command": "PRAGMA journal_mode=WAL;",  # readers don't block the writer
+        },
+    }
+}
+```
+
+Leave `transaction_mode` out and the ledger is still correct — SQLite fails the second writer rather than committing it over a stale read — but the failure arrives as `OperationalError: database is locked` in the middle of a `fulfill`. `IMMEDIATE` turns that error into a wait. The app registers a system check, `allowances.W001`, that says so at startup rather than under load.
+
+What SQLite genuinely gives up is decimal range, not correctness. It stores `DecimalField` as a float and Django rounds back to the field's six decimal places, which is exact to about fifteen significant digits: every amount up to `999999999.999999` survives the round trip untouched, and `tests/django/test_decimal_precision.py` holds both engines to that. Past it the low digits go — quietly at first (`1234567890.123456` comes back as `1234567890.123460`), then as `decimal.InvalidOperation` once the rounded value no longer fits the column. Postgres is exact across all twenty digits. Balances above a billion are a real reason to choose it; the ones this page used to give were not.
+
+::: tip Which to use
+Postgres for a deployment with concurrent writers across processes, where one global write lock becomes the bottleneck. SQLite for single-process deployments, embedded and desktop installs, small services, and every test suite that would rather not run a database server.
 :::
 
 ## Timestamps are settable

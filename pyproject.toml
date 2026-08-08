@@ -24,6 +24,9 @@ include = ["allowances*", "allowances_django*"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
+# pytest-django resolves the settings module before pytest inserts rootdir into sys.path, so a bare
+# `pytest` would not find `tests.settings` without this. `python -m pytest` happens to work either way.
+pythonpath = ["."]
 python_files = "test_*.py"
 testpaths = ["tests"]
 

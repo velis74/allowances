@@ -24,5 +24,5 @@ features:
   - title: Spend from several sources
     details: One operation can be paid for out of a specific budget, then general credits, then a promotional grant — at conversion rates you set, with a deterministic priority.
   - title: No ORM in the core
-    details: The engine talks to a sixteen-method storage port. Postgres via Django ships with it; anything else is an afternoon's work.
+    details: The engine talks to a sixteen-method storage port. Postgres and SQLite via Django ship with it; anything else is an afternoon's work.
 ---

@@ -161,6 +161,12 @@ class of "works in tests, breaks in prod" surprises.
 **Cost to revisit:** Low — swapping to SQLite later (e.g. for a faster CI matrix) is a
 `tests/settings.py` change only, no model changes expected.
 
+> **Superseded by [30](#_30-sqlite-is-a-supported-engine-not-a-tolerated-one).** The cost was
+> indeed low. SQLite is now a supported engine, the default for a fresh checkout, and covered by
+> its own CI rows; `tests/env.py` selects Postgres rather than being required for the suite to run
+> at all. The concern about partial indexes recorded above turned out to be unfounded — Django
+> reports `supports_partial_indexes = True` on SQLite, and has since 3.8.0.
+
 ---
 
 Autonomous-session decisions made while implementing **Concern 2 (fulfillment engine)**. Same rules as above: dilemma,
@@ -650,3 +656,64 @@ nothing until the floor itself moves to 6.x.
 
 **Cost to revisit:** Low. Raising the floor is one line here and one row in the matrix; raising the
 ceiling means adding a row and watching it go green first.
+
+## 30. SQLite is a supported engine, not a tolerated one
+
+**Dilemma:** The README, `DECISIONS.md` §9 and the Django backend page all said the same thing:
+use Postgres, because `select_for_update` and partial unique constraints are what the concurrency
+guarantee rests on and SQLite implements neither properly. That closes the door on every
+single-process, embedded and desktop deployment, and on any test suite that would rather not run a
+database server. It is worth checking whether the claim is true before paying that price.
+
+Half of it was not. Django reports `supports_partial_indexes = True` on the SQLite backend, and
+has since SQLite 3.8.0 in 2013 — the `UniqueConstraint(condition=…)` on `Transaction.storno_of`
+was never in question. Only `select_for_update` is genuinely absent (`has_select_for_update =
+False`), and it raises `NotSupportedError` rather than degrading quietly.
+
+**Decision:** Support both engines.
+
+- `_locked()` in `allowances_django/store.py` applies `select_for_update()` when
+  `connections[qs.db].features.has_select_for_update`, and returns the queryset untouched
+  otherwise. Five call sites, one helper, no engine named anywhere in the store.
+- SQLite deployments are asked for `OPTIONS={"transaction_mode": "IMMEDIATE", "timeout": 20,
+  "init_command": "PRAGMA journal_mode=WAL;"}`, and a system check — `allowances.W001`,
+  `allowances_django/checks.py` — says so at startup when they are missing.
+- `tests/django/test_concurrency.py` proves the guarantee rather than asserting it, on whichever
+  engine the suite is pointed at.
+- `tests/settings.py` defaults to a file-backed SQLite, so `pip install -e ".[test]" && pytest`
+  passes on a clean checkout with no database server anywhere. `tests/env.py` selects Postgres;
+  `ALLOWANCES_TEST_DB=sqlite` forces SQLite past it. CI runs both.
+
+**Reason:** Row locking was never the requirement — it was one implementation of the requirement,
+which is that no second unit of work reads a balance this one is about to change. SQLite meets that
+with a coarser instrument: one write lock over the whole database, held for the transaction.
+`transaction_mode: "IMMEDIATE"` (Django 5.1+) makes `atomic()` take it at `BEGIN` instead of on
+first write, at which point a `fulfill` is serialised against every other `fulfill` — strictly
+stronger than locking the rows it happens to touch.
+
+Two experiments decided this, and both are worth recording because neither is obvious:
+
+1. **The concurrency test is not vacuous.** Stub `_locked()` to return the queryset unchanged and
+   run it against Postgres, and both tests fail on lost updates — eight callers, ten units, more
+   than five granted. Run the same stubbed store against SQLite and they pass, because on SQLite
+   `_locked()` *is* that stub and the write lock is doing the work. The suite therefore
+   distinguishes a real guarantee from an absent one, which is the only reason its passing on
+   SQLite means anything.
+2. **Misconfiguration is loud, not silent.** With `DEFERRED` (Django's default), a transaction that
+   reads a balance and then writes it after another transaction has committed gets
+   `OperationalError: database is locked` on the write — verified directly against two connections
+   in WAL mode. It does not commit the stale value. So `allowances.W001` is a warning about
+   operational noise, not about correctness, and correctness does not depend on anyone reading it.
+
+What SQLite does cost is decimal range. It stores `DecimalField` as a float and Django rounds back
+to six decimal places, so amounts are exact to about fifteen significant digits — up to
+`999999999.999999`. Beyond that the low digits are lost silently (`1234567890.123456` returns as
+`1234567890.123460`) until the rounded value no longer fits `max_digits=20` and
+`decimal.InvalidOperation` is raised. `tests/django/test_decimal_precision.py` pins the range both
+engines agree on. That is now the honest reason to pick Postgres, along with concurrent writers
+across processes, for whom one global write lock is a bottleneck.
+
+**Cost to revisit:** Low in one direction, high in the other. Dropping back to Postgres-only is
+deleting a helper and some rows from the CI matrix. But the claim is now in the README and in a
+passing test on every push, so it is a promise, and withdrawing it after anyone deploys on SQLite
+is a breaking change for them.

@@ -14,7 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 
-from django.db import transaction as db_transaction
+from django.db import connections, transaction as db_transaction
 from django.db.models import Q, Sum
 
 from allowances.types import (
@@ -46,6 +46,25 @@ def _subject_q(subjects: Sequence[SubjectRef]) -> Q:
     for subject in subjects:
         query |= Q(subject_type=subject.type, subject_id=subject.id)
     return query
+
+
+def _locked(qs):
+    """
+    Take the strongest lock the connection offers on the rows this queryset selects.
+
+    On Postgres that is ``SELECT ... FOR UPDATE``. SQLite has no such statement and never will:
+    it holds one write lock for the whole database, so there is nothing finer to ask for. What
+    the engine needs is not row locking as such but the guarantee behind it — that no second
+    unit of work reads a balance this one is about to change — and on SQLite the write lock
+    supplies it for the entire transaction, provided the transaction takes that lock up front.
+    That is what ``transaction_mode: "IMMEDIATE"`` does, and why ``allowances.W001`` complains
+    when it is missing.
+
+    Configured wrong, SQLite still refuses to lose the update: the second transaction fails its
+    write with ``database is locked`` instead of committing a stale balance. The mode turns that
+    error into a wait.
+    """
+    return qs.select_for_update() if connections[qs.db].features.has_select_for_update else qs
 
 
 def to_wallet(row: Wallet) -> CoreWallet:
@@ -147,13 +166,13 @@ class DjangoStore:
             .order_by("created_at", "id")
         )
         if lock:
-            qs = qs.select_for_update()
+            qs = _locked(qs)
         return [to_wallet(row) for row in qs]
 
     def get_wallet(self, wallet_id: object, *, lock: bool = False) -> CoreWallet | None:
         qs = self._qs(Wallet).filter(pk=wallet_id)
         if lock:
-            qs = qs.select_for_update()
+            qs = _locked(qs)
         row = qs.first()
         return to_wallet(row) if row else None
 
@@ -202,7 +221,7 @@ class DjangoStore:
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[CoreWallet]:
         qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lte=at).order_by("created_at", "id")
         if lock:
-            qs = qs.select_for_update()
+            qs = _locked(qs)
         return [to_wallet(row) for row in qs]
 
     def archive_wallet(self, wallet: CoreWallet) -> None:
@@ -301,7 +320,7 @@ class DjangoStore:
         # because Postgres refuses to lock rows through a join.
         qs = self._qs(Transaction).filter(record_id=record_id).order_by("created_at", "id")
         if lock:
-            qs = qs.select_for_update()
+            qs = _locked(qs)
         return [to_transaction(row, record_guid=record_guid) for row in qs]
 
     def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
@@ -321,7 +340,7 @@ class DjangoStore:
     def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> CoreRecord | None:
         qs = self._qs(FulfillmentRecord).filter(guid=guid)
         if lock:
-            qs = qs.select_for_update()
+            qs = _locked(qs)
         row = qs.first()
         if row is None:
             return None

@@ -1,4 +1,5 @@
 from django.apps import AppConfig
+from django.core.checks import register
 
 
 class AllowancesConfig(AppConfig):
@@ -7,3 +8,8 @@ class AllowancesConfig(AppConfig):
     label = "allowances"
     verbose_name = "Allowances"
     default_auto_field = "django.db.models.BigAutoField"
+
+    def ready(self):
+        from allowances_django.checks import check_sqlite_transaction_mode
+
+        register(check_sqlite_transaction_mode)

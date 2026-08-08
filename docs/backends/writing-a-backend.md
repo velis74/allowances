@@ -50,7 +50,7 @@ Nothing returns your own types. Everything crossing the boundary is one of the f
 
 **Validity filtering belongs to you.** `find_wallets` returns only wallets valid at `at`: `valid_from` null or past, `valid_until` null or future. The engine does not re-check.
 
-**`storno_of` must be unique.** A transaction may be reversed at most once. Enforce it in storage, not in application code — a lost race here silently refunds twice. Postgres does it with a partial unique index; the in-memory backend scans and raises.
+**`storno_of` must be unique.** A transaction may be reversed at most once. Enforce it in storage, not in application code — a lost race here silently refunds twice. Postgres and SQLite both do it with a partial unique index; the in-memory backend scans and raises.
 
 **`sum_transactions` is on the hot path.** Every fulfillment against a [windowed wallet](/guide/sliding-windows) calls it. Index by `(wallet_id, created_at)` or the equivalent.
 

@@ -26,6 +26,10 @@ coverage.xml
 # Per-developer secrets (see tests/env.example.py)
 tests/env.py
 
+# The SQLite test database, and the WAL/shared-memory files beside it
+tests/*.sqlite3
+tests/*.sqlite3-*
+
 # OS
 .DS_Store
 

@@ -49,7 +49,7 @@ Two layers, kept deliberately apart:
 
 **State** — what a given subject holds and has spent. Wallets and a transaction ledger. This *is* in the database.
 
-The engine sits between them and knows nothing about either's storage. It receives definitions through a [provider](/api/core#definitionprovider) and state through a [store](/backends/), which is why the same code runs against Postgres or a dict.
+The engine sits between them and knows nothing about either's storage. It receives definitions through a [provider](/api/core#definitionprovider) and state through a [store](/backends/), which is why the same code runs against Postgres, SQLite or a dict.
 
 ## Where to go next
 

@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: "Django ${{ matrix.django }} · Python ${{ matrix.python }}"
+    name: "Django ${{ matrix.django }} · Python ${{ matrix.python }} · ${{ matrix.db }}"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -19,10 +19,14 @@ jobs:
       matrix:
         include:
           # Django 5.2 is the current LTS and the lowest version supported.
-          - { python: "3.11", django: "5.2" }
+          - { python: "3.11", django: "5.2", db: postgres }
           # Django 6.x requires Python 3.12 or newer, which is why the floor above stays on 3.11.
-          - { python: "3.12", django: "6.0" }
-          - { python: "3.13", django: "6.1" }
+          - { python: "3.12", django: "6.0", db: postgres }
+          - { python: "3.13", django: "6.1", db: postgres }
+          # Both engines are supported, so both are proven — including the concurrency tests, which
+          # is the whole point. Ends of the version range only; nothing in between is engine-specific.
+          - { python: "3.11", django: "5.2", db: sqlite }
+          - { python: "3.13", django: "6.1", db: sqlite }
 
     services:
       postgres:
@@ -56,8 +60,10 @@ jobs:
         run: python -c "import django, sys; print('Django', django.get_version(), '· Python', sys.version)"
 
       - name: Write test database credentials
-        # tests/settings.py reads tests/env.py, which is gitignored because it holds per-developer
-        # Postgres credentials. CI supplies its own.
+        # tests/settings.py falls back to SQLite when tests/env.py is absent, so the SQLite jobs
+        # skip this step entirely. The file is gitignored because it holds per-developer Postgres
+        # credentials; CI supplies its own.
+        if: matrix.db == 'postgres'
         run: |
           cat > tests/env.py <<'PY'
           DATABASE = dict(
@@ -72,14 +78,16 @@ jobs:
           PY
 
       - name: Test
+        env:
+          ALLOWANCES_TEST_DB: ${{ matrix.db }}
         run: coverage run -m pytest -q
 
       - name: Generate coverage report
-        if: matrix.python == '3.13' && matrix.django == '6.1'
+        if: matrix.python == '3.13' && matrix.django == '6.1' && matrix.db == 'postgres'
         run: coverage json
 
       - name: Incremental coverage check
-        if: matrix.python == '3.13' && matrix.django == '6.1'
+        if: matrix.python == '3.13' && matrix.django == '6.1' && matrix.db == 'postgres'
         uses: velis74/incremental-coverage-check@v2
         with:
           coverage-files: coverage.json
