@@ -1,3 +1,7 @@
+---
+description: 'What allowances is: grants and consumable budgets with a ledger, resolved across users, teams and organisations. Not payments, flags or authorisation.'
+---
+
 # What it is
 
 Applications keep needing to answer the same shape of question:

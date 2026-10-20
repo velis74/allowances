@@ -1,4 +1,6 @@
 ---
+title: Python quotas, credits and entitlements
+description: 'Python quotas and entitlements: grants and consumable budgets from user, team or organisation wallets, append-only ledger with storno, Django backend.'
 layout: home
 
 hero:

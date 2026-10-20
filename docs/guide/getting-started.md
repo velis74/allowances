@@ -1,3 +1,7 @@
+---
+description: 'Install allowances, declare features and currencies, pick the in-memory or Django store, then peek, fulfill, attach and unfulfill a first operation.'
+---
+
 # Getting started
 
 Nothing here needs a web framework. The engine is plain Python that does arithmetic against a
