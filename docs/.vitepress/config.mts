@@ -5,10 +5,9 @@ export default defineConfig({
   description:
     'Python quotas, credits and entitlements: grants and consumable budgets, append-only ledger with storno, sliding-window quotas, Django backend.',
   lastUpdated: true,
-  cleanUrls: true,
 
   transformHead({ pageData, siteConfig }) {
-    const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '')
+    const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html')
     return [['link', { rel: 'canonical', href: `https://docs.velis.si${siteConfig.site.base}${path}` }]]
   },
 
