@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'allowances',
   description:
-    'Python quotas, credits and entitlements: grants and consumable budgets, append-only ledger with storno, sliding-window quotas, Django backend.',
+    'May this happen, and can they afford it? Python grants and consumable budgets paid from several wallets, with an append-only ledger and storno. Django.',
   lastUpdated: true,
 
   transformHead({ pageData, siteConfig }) {
