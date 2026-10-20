@@ -3,9 +3,14 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'allowances',
   description:
-    'Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend.',
+    'Python quotas, credits and entitlements: grants and consumable budgets, append-only ledger with storno, sliding-window quotas, Django backend.',
   lastUpdated: true,
   cleanUrls: true,
+
+  transformHead({ pageData, siteConfig }) {
+    const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '')
+    return [['link', { rel: 'canonical', href: `https://docs.velis.si${siteConfig.site.base}${path}` }]]
+  },
 
   themeConfig: {
     nav: [
