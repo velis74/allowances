@@ -91,6 +91,8 @@ jobs:
         uses: velis74/incremental-coverage-check@v2
         with:
           coverage-files: coverage.json
+          # the VitePress config is docs tooling, not library code
+          extra-ignore-patterns: .vitepress/*
 
   lint:
     name: ruff
