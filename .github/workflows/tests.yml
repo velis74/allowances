@@ -88,11 +88,9 @@ jobs:
 
       - name: Incremental coverage check
         if: matrix.python == '3.13' && matrix.django == '6.1' && matrix.db == 'postgres'
-        uses: velis74/incremental-coverage-check@v2
+        uses: velis74/incremental-coverage-check@v3
         with:
           coverage-files: coverage.json
-          # the VitePress config is docs tooling, not library code
-          extra-ignore-patterns: .vitepress/*
 
   lint:
     name: ruff
