@@ -22,14 +22,18 @@ Issues = "https://github.com/velis74/allowances/issues"
 # Floor: 5.2, the current LTS — 5.1 reached end of life in December 2025 and nothing here needs an
 # API newer than Django 3.1 anyway. Ceiling: the 6.x series, tested against 6.0 and 6.1 in CI.
 django = ["Django>=5.2,<7"]
-test = ["pytest", "pytest-django", "psycopg2-binary", "coverage", "Django>=5.2,<7"]
+
+[dependency-groups]
+dev = ["Django>=5.2,<7", "pytest", "pytest-django", "psycopg2-binary", "coverage", "ruff"]
 
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
 
-[tool.setuptools.packages.find]
-include = ["allowances*", "allowances_django*"]
+[tool.uv.build-backend]
+# Two top-level packages in the repository root: the core and the Django backend.
+module-name = ["allowances", "allowances_django"]
+module-root = ""
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"

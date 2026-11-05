@@ -45,19 +45,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The incremental coverage check diffs against the base branch.
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python }}
 
       - name: Install
+        # The lock pins one Django per Python; the matrix then installs the series under test over it.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
-          pip install "Django~=${{ matrix.django }}.0"
+          uv sync --locked
+          uv pip install "Django~=${{ matrix.django }}.0"
 
       - name: Report the versions actually resolved
-        run: python -c "import django, sys; print('Django', django.get_version(), '· Python', sys.version)"
+        run: uv run --no-sync python -c "import django, sys; print('Django', django.get_version(), '· Python', sys.version)"
 
       - name: Write test database credentials
         # tests/settings.py falls back to SQLite when tests/env.py is absent, so the SQLite jobs
@@ -80,11 +83,11 @@ jobs:
       - name: Test
         env:
           ALLOWANCES_TEST_DB: ${{ matrix.db }}
-        run: coverage run -m pytest -q
+        run: uv run --no-sync coverage run -m pytest -q
 
       - name: Generate coverage report
         if: matrix.python == '3.13' && matrix.django == '6.1' && matrix.db == 'postgres'
-        run: coverage json
+        run: uv run --no-sync coverage json
 
       - name: Incremental coverage check
         if: matrix.python == '3.13' && matrix.django == '6.1' && matrix.db == 'postgres'
@@ -97,12 +100,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-      - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
 
   docs:
     name: docs build
@@ -112,5 +113,5 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-      - run: npm install
+      - run: npm ci
       - run: npm run docs:build
