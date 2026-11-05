@@ -567,11 +567,10 @@ def _reallot(store: Store, wallet: Wallet, new_amount: Decimal, top_up: bool, at
     if changes.get("reset_config", wallet.reset_config):
         balance, allotment = new_amount, new_amount
     else:
-        delta = new_amount - wallet.allotment
         allotment = new_amount
+        delta = new_amount - wallet.allotment
         if top_up:
             delta = max(delta, Decimal("0"))
-            allotment = max(wallet.allotment, new_amount)
         if delta != 0:
             store.create_transaction(wallet_id=wallet.id, kind=TransactionKind.GRANT, amount=delta, at=at)
         balance = wallet.balance + delta

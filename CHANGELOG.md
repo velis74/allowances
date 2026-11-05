@@ -2,6 +2,8 @@
 
 ## 0.3.0 — 2026-11-05
 
+Upgrade steps: [Upgrading to 0.3](https://docs.velis.si/allowances/guide/upgrading).
+
 ### Added
 
 - `credit()`: adds to a wallet's balance as a `grant` ledger entry, attached to the paying object;

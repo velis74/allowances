@@ -51,8 +51,7 @@ class SwitchPolicy(StrEnum):
 
     ``REPLACE`` closes it and opens a new wallet. ``ADJUST`` keeps it and adds the difference between
     the new and the old allotment to its balance, which may be negative. ``TOP_UP`` keeps it and adds
-    only a positive difference, and its allotment never decreases, so a downgrade followed by an
-    upgrade to the original plan adds nothing. On a windowed wallet both ``ADJUST`` and ``TOP_UP`` set
+    only a positive difference; both record the new allotment. On a windowed wallet both set
     the per-window allotment to the new value.
 
     A kept wallet has no ``allotment`` when it was opened under ``REPLACE``; it is then replaced. A

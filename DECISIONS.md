@@ -751,7 +751,9 @@ library.
 **Decision:** `WalletSpec.on_switch` with three values. `REPLACE` (default) is the previous
 behaviour. `ADJUST` and `TOP_UP` keep the current plan wallet of the same type and currency and move
 its balance by the difference against a stored `Wallet.allotment` (the plan's amount when the wallet
-was opened or last adjusted); `TOP_UP` ignores a negative difference and never lowers the allotment.
+was opened or last adjusted); `TOP_UP` ignores a negative difference. Both record the new amount as
+the allotment, so an upgrade after a downgrade adds the difference against the downgraded plan: the
+upgrade is paid for again, and whether a switch is paid is the application's concern.
 On windowed wallets both set the per-window allotment and keep the window's history. A wallet
 without an allotment, or a windowed/non-windowed mismatch, is replaced. Wallets with an allotment are
 exempt from drained-wallet archival. `adjust_wallet()` applies `ADJUST` arithmetic outside a plan
@@ -762,11 +764,12 @@ the open question in #10 about where `TransactionKind.GRANT` is written: by `cre
 non-windowed adjustments.
 
 **Reason:** Storing the allotment rather than deriving it from the ledger keeps the store port free
-of kind-filtered aggregates, and makes the `TOP_UP` rule (allotment never decreases) expressible: a
-downgrade followed by an upgrade back must not mint credits. Exempting allotment wallets from
-drained archival is what lets an exhausted plan wallet still receive the difference on upgrade
-instead of being replaced by a full new one; plan wallets are bounded per subject, so this does not
-grow the live table with history.
+of kind-filtered aggregates. Exempting allotment wallets from drained archival keeps two things
+working: an `ADJUST` capacity wallet at zero (storage full) must stay live so that `unfulfill` of a
+deletion frees space in it, and an exhausted `TOP_UP` wallet must still be found on upgrade, or the
+switch opens a new wallet with the full new amount instead of the difference. Such a wallet stays
+live only while its plan item does; a switch without the item or a cancellation closes it and
+`archive_expired_wallets` sweeps it, so the live table holds at most one per subject and plan item.
 
 **Constraints:** A switch with `ADJUST` or `TOP_UP` specs raises `ValueError` for a future
 `effective_date`. A stored balance cannot be changed at a future instant, so such a switch runs on

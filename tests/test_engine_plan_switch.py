@@ -183,16 +183,16 @@ def test_top_up_takes_nothing_away_on_a_downgrade(store, alice, provider):
 
     stored = store.get_wallet(wallet.id)
     assert stored.balance == Decimal("250")
-    assert stored.allotment == Decimal("300")
+    assert stored.allotment == Decimal("100")
 
 
-def test_top_up_adds_nothing_when_returning_to_the_original_plan(store, alice):
+def test_an_upgrade_after_a_downgrade_adds_the_difference_against_the_downgraded_plan(store, alice):
     [wallet] = plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
     plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
 
     plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
 
-    assert store.get_wallet(wallet.id).balance == Decimal("300")
+    assert store.get_wallet(wallet.id).balance == Decimal("500")
 
 
 def test_a_drained_top_up_wallet_stays_live_and_receives_the_difference(store, alice, provider):

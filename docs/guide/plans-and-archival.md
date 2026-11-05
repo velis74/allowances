@@ -58,7 +58,7 @@ A user on 10 GB with 8 GB in use who moves to 100 GB has 92 GB left; a reversal 
 The arithmetic needs the old plan's amount, so a wallet opened under `adjust` or `top_up` records it as `allotment`:
 
 - `adjust` sets the allotment to the new amount. On a downgrade below current usage the balance goes negative: the subject is over the limit and `fulfill` refuses until usage drops back below it.
-- `top_up` never lowers the allotment. A downgrade followed by an upgrade back to the original plan adds nothing.
+- `top_up` also sets the allotment to the new amount, but leaves the balance alone on a downgrade: what the subject had stays until it is spent or the wallet expires. A later upgrade adds the difference against the downgraded plan, since the upgrade is paid for again.
 - On a [windowed](/guide/sliding-windows) wallet both set the per-window allotment to the new amount. The window's history stays, so switching plans does not hand out a fresh window.
 - A kept wallet is never archived for being drained — the next switch adjusts it.
 

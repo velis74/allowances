@@ -164,7 +164,7 @@ A wallet to open, without saying for whom. Used by `plan_switch` and `open_walle
 
 ### `SwitchPolicy`
 
-`REPLACE` closes the existing wallet and opens a new one. `ADJUST` keeps it and moves its balance by *new − old allotment*, possibly below zero. `TOP_UP` keeps it, adds only a positive difference and never lowers its allotment. On a windowed wallet `ADJUST` and `TOP_UP` both set the per-window allotment to the new amount. A wallet without an allotment, or one whose windowed-ness differs from the spec's, is replaced.
+`REPLACE` closes the existing wallet and opens a new one. `ADJUST` keeps it and moves its balance by *new − old allotment*, possibly below zero. `TOP_UP` keeps it and adds only a positive difference; both record the new allotment. On a windowed wallet `ADJUST` and `TOP_UP` both set the per-window allotment to the new amount. A wallet without an allotment, or one whose windowed-ness differs from the spec's, is replaced.
 
 ### `FulfillmentResult`
 

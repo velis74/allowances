@@ -39,6 +39,10 @@ export default defineConfig({
             { text: 'Credits and budgets', link: '/guide/credits-and-budgets' },
           ],
         },
+        {
+          text: 'Upgrading',
+          items: [{ text: 'Upgrading to 0.3', link: '/guide/upgrading' }],
+        },
       ],
       '/backends/': [
         {
