@@ -86,8 +86,9 @@ class FeatureDefinition:
     """
     A named capability: ``send_email``, ``coolant_fill``.
 
-    ``fulfillment_order`` is either a list of ``(wallet_type, subject_name)`` steps or a callable
-    that receives the candidate wallets and returns them in draw order. Note the callable receives
+    ``fulfillment_order`` is either a list of ``(wallet_type, subject_name, source)`` steps or a
+    callable that receives the candidate wallets and returns them in draw order. A ``source`` of
+    ``None`` matches wallets of every source. Note the callable receives
     a ``list[Wallet]`` — plain value objects, not a database query — so the same ordering function
     works against any backend.
     """
@@ -127,7 +128,12 @@ class DictProvider(DefinitionProvider):
                     "grant": {"currencies": ["email_send"]},
                     "consumable": {"currencies": ["email_send", ("credits", 0.5)]},
                     "subjects": {"device", "team"},
-                    "fulfillment_order": [("grant", "device"), ("grant", None), "team"],
+                    "fulfillment_order": [
+                        ("grant", "device"),
+                        ("grant", None),
+                        ("consumable", "team", "plan"),
+                        "team",
+                    ],
                     "overdraft": False,
                 },
             },
@@ -191,9 +197,12 @@ class DictProvider(DefinitionProvider):
         parsed = []
         for entry in raw:
             if isinstance(entry, str):
-                # Shorthand: "team" means (None, "team") — any wallet type, that subject.
-                parsed.append((None, entry))
-            else:
+                # Shorthand: "team" means (None, "team", None) — any wallet type and source, that subject.
+                parsed.append((None, entry, None))
+            elif len(entry) == 2:
                 wallet_type, subject = entry
-                parsed.append((wallet_type, subject))
+                parsed.append((wallet_type, subject, None))
+            else:
+                wallet_type, subject, source = entry
+                parsed.append((wallet_type, subject, source))
         return parsed

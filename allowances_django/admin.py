@@ -29,8 +29,8 @@ class SubjectDisplayMixin:
 
 @admin.register(Wallet)
 class WalletAdmin(SubjectDisplayMixin, admin.ModelAdmin):
-    list_display = ("id", "subject", "wallet_type", "currency", "balance", "valid_from", "valid_until")
-    list_filter = ("wallet_type", "currency")
+    list_display = ("id", "subject", "wallet_type", "currency", "source", "balance", "valid_from", "valid_until")
+    list_filter = ("wallet_type", "currency", "source")
     search_fields = ("subject_type", "subject_id", "currency")
     date_hierarchy = "created_at"
 

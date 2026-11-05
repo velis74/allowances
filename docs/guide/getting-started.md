@@ -56,7 +56,7 @@ INSTALLED_APPS = [
 :::
 
 `MemoryStore` is for tests and for trying things out — it dies with the process. For real storage,
-either install the Django backend or [write your own](/backends/writing-a-backend): it is sixteen
+either install the Django backend or [write your own](/backends/writing-a-backend): it is seventeen
 methods.
 
 ## Declare what exists
@@ -145,8 +145,8 @@ yours to choose; the Django adapter uses `"app_label.modelname"`.
 
 ## Give somebody something to spend
 
-Wallets hold balances. `plan_switch` is the usual way to open them — it closes whatever the subject
-had and opens a new set atomically, which is exactly what putting someone on a plan means:
+Wallets hold balances. `plan_switch` is the usual way to open them — it closes the subject's plan
+wallets and opens a new set atomically, which is exactly what putting someone on a plan means:
 
 ::: code-group
 
@@ -184,6 +184,9 @@ plan_switch(
 
 The only difference is the first argument: the core functions take the store explicitly, the Django
 shortcuts supply it — and the provider — for you.
+
+Wallets outside a plan — a purchased credit pack, a spending budget — are opened with `open_wallet`
+and funded with `credit`; see [Credits and budgets](/guide/credits-and-budgets).
 
 ## Spend it
 

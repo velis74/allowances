@@ -20,6 +20,7 @@ from django.db.models import Q, Sum
 from allowances.types import (
     FulfillmentRecord as CoreRecord,
     ObjectRef,
+    PLAN_SOURCE,
     SubjectRef,
     Transaction as CoreTransaction,
     TransactionKind,
@@ -81,6 +82,8 @@ def to_wallet(row: Wallet) -> CoreWallet:
         overdraft_limit=row.overdraft_limit,
         first_overdraft_at=row.first_overdraft_at,
         reset_config=row.reset_config,
+        source=row.source,
+        allotment=row.allotment,
     )
 
 
@@ -182,6 +185,9 @@ class DjangoStore:
             first_overdraft_at=wallet.first_overdraft_at,
             valid_from=wallet.valid_from,
             valid_until=wallet.valid_until,
+            overdraft_limit=wallet.overdraft_limit,
+            reset_config=wallet.reset_config,
+            allotment=wallet.allotment,
         )
 
     def create_wallet(
@@ -195,6 +201,8 @@ class DjangoStore:
         reset_config: dict | None = None,
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
+        source: str = PLAN_SOURCE,
+        allotment: Decimal | None = None,
     ) -> CoreWallet:
         row = Wallet(
             subject_type=subject.type,
@@ -206,17 +214,26 @@ class DjangoStore:
             reset_config=reset_config,
             valid_from=valid_from,
             valid_until=valid_until,
+            source=source,
+            allotment=None if allotment is None else Decimal(str(allotment)),
         )
         row.save(using=self.using)
         return to_wallet(row)
 
-    def close_wallets(self, *, subject: SubjectRef, at: datetime) -> int:
-        return (
-            self._qs(Wallet)
-            .filter(subject_type=subject.type, subject_id=subject.id)
-            .filter(_validity_q(at))
-            .update(valid_until=at)
-        )
+    def close_wallets(
+        self,
+        *,
+        subject: SubjectRef,
+        at: datetime,
+        source: str | None = None,
+        exclude: Sequence[object] = (),
+    ) -> int:
+        qs = self._qs(Wallet).filter(subject_type=subject.type, subject_id=subject.id).filter(_validity_q(at))
+        if source is not None:
+            qs = qs.filter(source=source)
+        if exclude:
+            qs = qs.exclude(pk__in=list(exclude))
+        return qs.update(valid_until=at)
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[CoreWallet]:
         qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lte=at).order_by("created_at", "id")
@@ -241,6 +258,8 @@ class DjangoStore:
             overdraft_limit=row.overdraft_limit,
             first_overdraft_at=row.first_overdraft_at,
             reset_config=row.reset_config,
+            source=row.source,
+            allotment=row.allotment,
             original_created_at=row.created_at,
         )
         archive.save(using=self.using)
@@ -287,6 +306,15 @@ class DjangoStore:
             .aggregate(total=Sum("amount"))["total"]
         )
         return total or Decimal("0")
+
+    def transactions_for_wallet(self, *, wallet_id: object, since: datetime, until: datetime) -> list[CoreTransaction]:
+        qs = (
+            self._qs(Transaction)
+            .filter(wallet_id=wallet_id, created_at__gte=since, created_at__lte=until)
+            .select_related("record")
+            .order_by("created_at", "id")
+        )
+        return [to_transaction(row) for row in qs]
 
     def create_transaction(
         self,

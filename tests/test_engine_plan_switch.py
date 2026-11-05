@@ -5,11 +5,11 @@ from decimal import Decimal
 
 import pytest
 
-from allowances.engine import plan_switch
-from allowances.types import WalletSpec, WalletType
+from allowances.engine import fulfill, plan_switch, unfulfill
+from allowances.types import SwitchPolicy, TransactionKind, WalletSpec, WalletType
 from allowances.windows import utcnow
 from tests.conftest import open_wallet
-from tests.helpers import wallets_for_subject
+from tests.helpers import transactions_for_wallet, wallets_for_subject
 
 
 def test_closes_the_old_wallet_and_opens_the_new_one(store, alice):
@@ -130,3 +130,160 @@ def test_a_failure_partway_through_rolls_the_whole_switch_back(store, alice, mon
     # The old wallet must still be open and no new wallet may survive.
     assert store.get_wallet(old.id).valid_until is None
     assert [w.id for w in wallets_for_subject(store, alice)] == [old.id]
+
+
+# -- switch policies ---------------------------------------------------------------------------
+
+
+def _spec(balance, policy, **kwargs):
+    return WalletSpec(WalletType.CONSUMABLE, "credits", Decimal(balance), on_switch=policy, **kwargs)
+
+
+def test_only_plan_wallets_are_closed(store, alice):
+    plan = open_wallet(store, alice, balance="5")
+    budget = open_wallet(store, alice, balance="50", source="budget")
+
+    plan_switch(store, {"user": alice}, [WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("100"))])
+
+    assert store.get_wallet(plan.id).valid_until is not None
+    assert store.get_wallet(budget.id).valid_until is None
+
+
+def test_a_spec_with_a_keep_policy_records_its_allotment(store, alice):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+
+    assert wallet.allotment == Decimal("100")
+    assert store.get_wallet(wallet.id).allotment == Decimal("100")
+
+
+def test_a_replace_spec_records_no_allotment(store, alice):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.REPLACE)])
+
+    assert wallet.allotment is None
+
+
+def test_top_up_keeps_the_wallet_and_adds_the_difference(store, alice, provider):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+    fulfill(store, "send_email", 70, {"device": alice}, provider)
+
+    [after] = plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
+
+    assert after.id == wallet.id
+    assert store.get_wallet(wallet.id).balance == Decimal("230")
+    assert store.get_wallet(wallet.id).valid_until is None
+    grants = [t for t in transactions_for_wallet(store, wallet.id) if t.kind == TransactionKind.GRANT]
+    assert [t.amount for t in grants] == [Decimal("200")]
+
+
+def test_top_up_takes_nothing_away_on_a_downgrade(store, alice, provider):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
+    fulfill(store, "send_email", 50, {"device": alice}, provider)
+
+    plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+
+    stored = store.get_wallet(wallet.id)
+    assert stored.balance == Decimal("250")
+    assert stored.allotment == Decimal("300")
+
+
+def test_top_up_adds_nothing_when_returning_to_the_original_plan(store, alice):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
+    plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+
+    plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
+
+    assert store.get_wallet(wallet.id).balance == Decimal("300")
+
+
+def test_a_drained_top_up_wallet_stays_live_and_receives_the_difference(store, alice, provider):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+    fulfill(store, "send_email", 100, {"device": alice}, provider)
+
+    plan_switch(store, {"user": alice}, [_spec("300", SwitchPolicy.TOP_UP)])
+
+    assert store.get_wallet(wallet.id).balance == Decimal("200")
+
+
+def test_adjust_carries_usage_across_an_upgrade(store, alice, provider):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("10", SwitchPolicy.ADJUST)])
+    fulfill(store, "send_email", 8, {"device": alice}, provider)
+
+    plan_switch(store, {"user": alice}, [_spec("20", SwitchPolicy.ADJUST)])
+
+    stored = store.get_wallet(wallet.id)
+    assert stored.balance == Decimal("12")
+    assert stored.allotment == Decimal("20")
+
+
+def test_adjust_can_leave_a_downgraded_wallet_over_its_limit(store, alice, provider):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("20", SwitchPolicy.ADJUST)])
+    fulfill(store, "send_email", 15, {"device": alice}, provider)
+
+    plan_switch(store, {"user": alice}, [_spec("10", SwitchPolicy.ADJUST)])
+
+    assert store.get_wallet(wallet.id).balance == Decimal("-5")
+    assert fulfill(store, "send_email", 1, {"device": alice}, provider, allow_partial=True).granted == 0
+
+
+def test_a_reversal_after_adjust_returns_to_the_kept_wallet(store, alice, provider):
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("10", SwitchPolicy.ADJUST)])
+    result = fulfill(store, "send_email", 8, {"device": alice}, provider)
+    plan_switch(store, {"user": alice}, [_spec("20", SwitchPolicy.ADJUST)])
+
+    unfulfill(store, result.guid)
+
+    assert store.get_wallet(wallet.id).balance == Decimal("20")
+
+
+def test_adjust_on_a_windowed_wallet_changes_the_allotment_and_keeps_the_window(store, alice):
+    daily = {"time": "00:00:00"}
+    [wallet] = plan_switch(store, {"user": alice}, [_spec("200", SwitchPolicy.ADJUST, reset_config=daily)])
+
+    plan_switch(store, {"user": alice}, [_spec("500", SwitchPolicy.ADJUST, reset_config=daily)])
+
+    stored = store.get_wallet(wallet.id)
+    assert stored.balance == Decimal("500")
+    assert stored.valid_until is None
+    assert [t for t in transactions_for_wallet(store, wallet.id) if t.kind == TransactionKind.GRANT] == []
+
+
+def test_a_wallet_opened_under_replace_is_replaced_by_a_keep_spec(store, alice):
+    old = open_wallet(store, alice, balance="5")
+
+    [new] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+
+    assert new.id != old.id
+    assert store.get_wallet(old.id).valid_until is not None
+    assert new.balance == Decimal("100")
+
+
+def test_a_change_between_windowed_and_stored_balance_replaces_the_wallet(store, alice):
+    [old] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.ADJUST)])
+
+    [new] = plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.ADJUST, reset_config={"time": "00:00:00"})])
+
+    assert new.id != old.id
+    assert store.get_wallet(old.id).valid_until is not None
+
+
+def test_a_wallet_absent_from_the_new_plan_is_closed(store, alice):
+    [credits_wallet, storage] = plan_switch(
+        store,
+        {"user": alice},
+        [
+            _spec("100", SwitchPolicy.TOP_UP),
+            WalletSpec(WalletType.GRANT, "storage", Decimal("10"), on_switch=SwitchPolicy.ADJUST),
+        ],
+    )
+
+    plan_switch(store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)])
+
+    assert store.get_wallet(credits_wallet.id).valid_until is None
+    assert store.get_wallet(storage.id).valid_until is not None
+
+
+def test_a_keep_spec_cannot_be_scheduled(store, alice):
+    with pytest.raises(ValueError):
+        plan_switch(
+            store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)], effective_date=utcnow() + timedelta(days=1)
+        )

@@ -36,6 +36,7 @@ export default defineConfig({
             { text: 'Overdraft', link: '/guide/overdraft' },
             { text: 'Reversals and recovery', link: '/guide/reversals' },
             { text: 'Plans and archival', link: '/guide/plans-and-archival' },
+            { text: 'Credits and budgets', link: '/guide/credits-and-budgets' },
           ],
         },
       ],

@@ -2,13 +2,13 @@
 
 The engine does arithmetic. Deciding which wallets are candidates, walking them in order, converting at rates, rounding, running the overdraft pass, computing window balances — none of that needs to know what a database is.
 
-So it doesn't. The engine receives a **store** and talks to it through sixteen methods. Everything else is pure Python.
+So it doesn't. The engine receives a **store** and talks to it through seventeen methods. Everything else is pure Python.
 
 ```
       your application
              │
              ▼
-   allowances.engine          peek · fulfill · attach · unfulfill · plan_switch
+   allowances.engine          peek · fulfill · attach · unfulfill · credit · plan_switch
              │
      ┌───────┴────────┐
      ▼                ▼

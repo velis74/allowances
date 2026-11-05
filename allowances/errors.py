@@ -26,6 +26,17 @@ class RecordNotFoundError(AllowancesError, LookupError):
     """
 
 
+class WalletNotFoundError(AllowancesError, LookupError):
+    """No live wallet exists with the given id — it was never opened, or it has been archived."""
+
+
+class UnsuitableWalletError(AllowancesError, ValueError):
+    """
+    The wallet cannot take this operation: :func:`allowances.engine.credit` on a windowed or expired
+    wallet, or :func:`allowances.engine.adjust_wallet` on a wallet without an ``allotment``.
+    """
+
+
 class InsufficientBalanceError(AllowancesError):
     """
     ``fulfill(..., allow_partial=False)`` could not cover the whole request.

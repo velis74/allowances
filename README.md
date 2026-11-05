@@ -18,7 +18,7 @@ It is **not a payment system** — no invoices, no card charges, no money anywhe
 
 ## Install
 
-Django is optional. The core is `import allowances` and depends on nothing at all — not Django, not a database driver, not anything outside the standard library. Everything that matters (the ordering walk, conversion, rounding, overdraft, sliding windows) lives there, and talks to storage through a sixteen-method port.
+Django is optional. The core is `import allowances` and depends on nothing at all — not Django, not a database driver, not anything outside the standard library. Everything that matters (the ordering walk, conversion, rounding, overdraft, sliding windows) lives there, and talks to storage through a seventeen-method port.
 
 ```bash
 pip install allowances            # the engine, zero dependencies
@@ -70,10 +70,10 @@ attach(result.guid, message)   # record what the quota bought
 
 Two layers, kept apart. **Definition** — what rights exist at all: features, currencies, conversion rates, priority order. Configuration, not rows. **State** — what a subject holds and has spent: wallets and a transaction ledger.
 
-The engine sits between them and knows nothing about either's storage. It receives definitions through a provider and state through a sixteen-method store port, which is why the same code runs against Postgres, SQLite or a dict.
+The engine sits between them and knows nothing about either's storage. It receives definitions through a provider and state through a seventeen-method store port, which is why the same code runs against Postgres, SQLite or a dict.
 
 ```
-   allowances.engine        peek · fulfill · attach · unfulfill · plan_switch
+   allowances.engine        peek · fulfill · attach · unfulfill · credit · plan_switch
            │
    ┌───────┴────────┐
    ▼                ▼

@@ -26,6 +26,7 @@ from allowances.types import (
     FulfillmentRecord,
     Modifier,
     ObjectRef,
+    PLAN_SOURCE,
     SubjectRef,
     Transaction,
     TransactionKind,
@@ -145,6 +146,8 @@ class MemoryStore:
         reset_config: dict | None = None,
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
+        source: str = PLAN_SOURCE,
+        allotment: Decimal | None = None,
     ) -> Wallet:
         wallet = Wallet(
             id=next(self._wallet_ids),
@@ -157,15 +160,30 @@ class MemoryStore:
             valid_until=valid_until,
             overdraft_limit=None if overdraft_limit is None else Decimal(str(overdraft_limit)),
             reset_config=reset_config,
+            source=source,
+            allotment=None if allotment is None else Decimal(str(allotment)),
         )
         self._wallets[wallet.id] = wallet
         self._created_seq[("wallet", wallet.id)] = next(self._sequence)
         return wallet
 
-    def close_wallets(self, *, subject: SubjectRef, at: datetime) -> int:
+    def close_wallets(
+        self,
+        *,
+        subject: SubjectRef,
+        at: datetime,
+        source: str | None = None,
+        exclude: Sequence[object] = (),
+    ) -> int:
+        excluded = set(exclude)
         closed = 0
         for wallet_id, wallet in list(self._wallets.items()):
-            if wallet.subject == subject and wallet.is_valid_at(at):
+            if (
+                wallet.subject == subject
+                and wallet.is_valid_at(at)
+                and (source is None or wallet.source == source)
+                and wallet_id not in excluded
+            ):
                 self._wallets[wallet_id] = replace(wallet, valid_until=at)
                 closed += 1
         return closed
@@ -195,6 +213,10 @@ class MemoryStore:
             ),
             Decimal("0"),
         )
+
+    def transactions_for_wallet(self, *, wallet_id: object, since: datetime, until: datetime) -> list[Transaction]:
+        found = [t for t in self._transactions.values() if t.wallet_id == wallet_id and since <= t.created_at <= until]
+        return sorted(found, key=lambda t: self._sort_key("transaction", t))
 
     def create_transaction(
         self,

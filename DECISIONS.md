@@ -717,3 +717,79 @@ across processes, for whom one global write lock is a bottleneck.
 deleting a helper and some rows from the CI matrix. But the claim is now in the README and in a
 passing test on every push, so it is a promise, and withdrawing it after anyone deploys on SQLite
 is a breaking change for them.
+
+## 31. Wallets have a `source`, and `plan_switch` only touches `source == "plan"`
+
+**Dilemma:** `plan_switch` closed every wallet a subject held, and it was the only public way to
+fund a wallet. Credits a customer bought outside the plan therefore had nowhere to live: a purchased
+pack opened through the store would be closed by the next plan change, losing paid-for balance.
+
+**Decision:** `Wallet.source` is a free string, default `"plan"` (`PLAN_SOURCE`). `plan_switch` opens
+wallets with that source and closes only those; `open_wallet(..., source=...)` opens any other
+source, which no plan switch ever closes. `fulfillment_order` steps take an optional third element,
+`source`, so one subject's wallets of one currency can be ordered by origin (plan before budget).
+`credit()` adds to an existing wallet as a `TransactionKind.GRANT` entry, attached to the paying
+object; with a `guid` it is reversible by `unfulfill`.
+
+**Reason:** Origin decides lifetime. A free string rather than an enum lets an application name its
+own origins (`"purchase"`, `"budget"`, `"promo"`) without a library change; only `"plan"` has
+meaning to the engine. Existing rows default to `"plan"`, so existing behaviour is unchanged.
+
+**Cost to revisit:** Medium. The field is in both backends' schemas and in the store port
+(`create_wallet`, `close_wallets`).
+
+## 32. Per-spec switch policies: `REPLACE`, `ADJUST`, `TOP_UP`
+
+**Dilemma:** Closing and reopening is wrong for two kinds of wallet. A capacity wallet (storage,
+seats) holds *limit − usage*; replacing it hands out the full new limit while usage persists, and a
+later `unfulfill` of an upload made before the switch credits the closed wallet, so the space is
+never freed. Plan credits under commercial terms like "an upgrade adds the difference, used credits
+stay used" also need the old wallet kept. Other wallets — monthly quotas that start over, boolean
+grants — are right to be replaced. Which applies is a property of the plan item, not of the
+library.
+
+**Decision:** `WalletSpec.on_switch` with three values. `REPLACE` (default) is the previous
+behaviour. `ADJUST` and `TOP_UP` keep the current plan wallet of the same type and currency and move
+its balance by the difference against a stored `Wallet.allotment` (the plan's amount when the wallet
+was opened or last adjusted); `TOP_UP` ignores a negative difference and never lowers the allotment.
+On windowed wallets both set the per-window allotment and keep the window's history. A wallet
+without an allotment, or a windowed/non-windowed mismatch, is replaced. Wallets with an allotment are
+exempt from drained-wallet archival. `adjust_wallet()` applies `ADJUST` arithmetic outside a plan
+switch (a spending limit changed mid-period).
+
+This supersedes the "close every wallet" part of #17 (the per-subject fan-out stands) and resolves
+the open question in #10 about where `TransactionKind.GRANT` is written: by `credit()` and by
+non-windowed adjustments.
+
+**Reason:** Storing the allotment rather than deriving it from the ledger keeps the store port free
+of kind-filtered aggregates, and makes the `TOP_UP` rule (allotment never decreases) expressible: a
+downgrade followed by an upgrade back must not mint credits. Exempting allotment wallets from
+drained archival is what lets an exhausted plan wallet still receive the difference on upgrade
+instead of being replaced by a full new one; plan wallets are bounded per subject, so this does not
+grow the live table with history.
+
+**Constraints:** A switch with `ADJUST` or `TOP_UP` specs raises `ValueError` for a future
+`effective_date`. A stored balance cannot be changed at a future instant, so such a switch runs on
+the day. Within a static `fulfillment_order` step the engine orders wallets soonest-`valid_until`
+first (none last, store order for ties), so expiring plan credits are spent before permanent
+purchased ones; the store's `(created_at, id)` order remains its contract.
+
+**Cost to revisit:** Medium. Changing the default policy would change every existing caller's plan
+switches.
+
+## 33. Postpaid budgets are a recipe, not a feature
+
+**Dilemma:** Overage billing (a monthly allowance, then spend up to a customer-set limit, billed
+afterwards) is common. Implementing it fully means invoicing and payment-provider integration, which
+the library does not do.
+
+**Decision:** The library supplies the pieces — a `"budget"`-source wallet with an `ADJUST`
+allotment as the limit, source-filtered `fulfillment_order` steps, `adjust_wallet()` for limit
+changes, and `consumed(wallet, since, until)` (net consumption in a period, reversals of consumption
+deducted, credits and adjustments ignored) as the billing figure. `docs/guide/credits-and-budgets.md`
+shows the assembly. `consumed` needs `Store.transactions_for_wallet`, added to the port.
+
+**Reason:** Enforcement and the ledger are the library's; charging is the application's. The figure
+an invoice needs is a ledger question, so the library answers it.
+
+**Cost to revisit:** Low. Everything is additive.

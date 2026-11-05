@@ -13,13 +13,23 @@ When a request can be paid for from several places, something has to decide whic
 ],
 ```
 
-Each step is `(wallet_type, subject_name)`:
+Each step is `(wallet_type, subject_name)` or `(wallet_type, subject_name, source)`:
 
 - `wallet_type` is `"grant"`, `"consumable"`, or `None` for either.
 - `subject_name` is one of the keys you pass to `fulfill()`, or `None` for every subject you passed, in the order you passed them.
-- A bare string is shorthand: `"location"` means `(None, "location")`.
+- `source` limits the step to wallets with that [`source`](/guide/concepts#wallet) — `"plan"`, `"purchase"`, `"budget"`. Omitted or `None`, the step matches every source.
+- A bare string is shorthand: `"location"` means `(None, "location", None)`.
 
-Steps are walked in order. Within one step, wallets come back **oldest first**, so a soon-to-expire grant is spent before a newly opened one.
+Steps are walked in order. Within one step, the wallet that **expires soonest** is drawn first, wallets without `valid_until` last, and wallets with the same expiry oldest first. Monthly plan credits are therefore spent before purchased credits that never expire, and a soon-to-expire grant before a fresh one.
+
+Splitting one subject's wallets by source puts the plan's included amount ahead of a paid budget in the same currency:
+
+```python
+"fulfillment_order": [
+    ("consumable", "user", "plan"),
+    ("consumable", "user", "budget"),
+],
+```
 
 Two things worth knowing:
 

@@ -1,7 +1,7 @@
 """
 The storage port.
 
-This is the whole surface the engine needs from persistence — fourteen methods. Implement it and
+This is the whole surface the engine needs from persistence — seventeen methods. Implement it and
 the engine runs against your storage unchanged. Two implementations ship with the library:
 :class:`allowances.backends.memory.MemoryStore` and ``allowances_django.store.DjangoStore``.
 
@@ -32,6 +32,7 @@ from typing import Protocol, runtime_checkable, Sequence
 from allowances.types import (
     FulfillmentRecord,
     ObjectRef,
+    PLAN_SOURCE,
     SubjectRef,
     Transaction,
     TransactionKind,
@@ -81,7 +82,10 @@ class Store(Protocol):
         ...
 
     def save_wallet(self, wallet: Wallet) -> None:
-        """Persist a wallet's mutable fields: ``balance`` and ``first_overdraft_at``."""
+        """
+        Persist a wallet's mutable fields: ``balance``, ``first_overdraft_at``, ``valid_from``,
+        ``valid_until``, ``overdraft_limit``, ``reset_config`` and ``allotment``.
+        """
         ...
 
     def create_wallet(
@@ -95,14 +99,26 @@ class Store(Protocol):
         reset_config: dict | None = None,
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
+        source: str = PLAN_SOURCE,
+        allotment: Decimal | None = None,
     ) -> Wallet:
         """Open a new wallet and return it, with ``id`` and ``created_at`` filled in."""
         ...
 
-    def close_wallets(self, *, subject: SubjectRef, at: datetime) -> int:
+    def close_wallets(
+        self,
+        *,
+        subject: SubjectRef,
+        at: datetime,
+        source: str | None = None,
+        exclude: Sequence[object] = (),
+    ) -> int:
         """
         Set ``valid_until = at`` on every wallet of ``subject`` currently valid at ``at``, making
         them invisible to fulfillment from that instant. Returns how many were closed.
+
+        ``source`` limits this to wallets with that ``source``; ``None`` closes every source.
+        Wallets whose id is in ``exclude`` stay open.
         """
         ...
 
@@ -126,6 +142,10 @@ class Store(Protocol):
         are none. Drives sliding-window balances, so it is on the hot path of every fulfillment
         against a windowed wallet.
         """
+        ...
+
+    def transactions_for_wallet(self, *, wallet_id: object, since: datetime, until: datetime) -> list[Transaction]:
+        """The wallet's transactions in ``[since, until]``, ordered by ``(created_at, id)``."""
         ...
 
     def create_transaction(

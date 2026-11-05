@@ -1,5 +1,6 @@
 """
-The fulfillment engine — ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``plan_switch``.
+The fulfillment engine — ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``,
+``open_wallet``, ``adjust_wallet``, ``consumed``, ``plan_switch``.
 
 Nothing in this module knows what a database is. It receives a :class:`~allowances.store.Store`
 and a :class:`~allowances.definitions.DefinitionProvider` and does arithmetic between them, which
@@ -20,12 +21,20 @@ from decimal import Decimal
 from typing import Iterable, Sequence
 
 from allowances.definitions import DefinitionProvider, FeatureDefinition
-from allowances.errors import InsufficientBalanceError, RecordNotFoundError
+from allowances.errors import (
+    InsufficientBalanceError,
+    RecordNotFoundError,
+    UnsuitableWalletError,
+    WalletNotFoundError,
+)
 from allowances.rounding import apply_round
 from allowances.store import Store
 from allowances.types import (
     FulfillmentResult,
     ObjectRef,
+    PLAN_SOURCE,
+    SubjectRef,
+    SwitchPolicy,
     Transaction,
     TransactionKind,
     Wallet,
@@ -79,8 +88,8 @@ def _ordered_wallets(
     order they should be drawn from.
 
     A callable ``fulfillment_order`` gets one flat list of every plausible candidate and decides
-    the order itself. A list of steps is walked in declaration order; within a step, wallets come
-    back oldest-first, which is what makes soon-to-expire grants get spent before fresh ones.
+    the order itself. A list of steps is walked in declaration order; within a step, wallets that
+    expire soonest come first, wallets without ``valid_until`` last, and equal expiries oldest-first.
     """
     subject_refs = list(subjects.values())
     if not subject_refs:
@@ -104,7 +113,8 @@ def _ordered_wallets(
 
     seen: set = set()
     ordered: list[Wallet] = []
-    for step_type, step_subject in feature_def.fulfillment_order:
+    for step in feature_def.fulfillment_order:
+        step_type, step_subject, step_source = (*step, None)[:3]
         wallet_types = [step_type] if step_type is not None else [WalletType.GRANT, WalletType.CONSUMABLE]
         # A step naming a subject the caller didn't supply is skipped, not an error — features are
         # declared once and called from contexts that legitimately know about different subjects.
@@ -119,17 +129,25 @@ def _ordered_wallets(
             if section is None or not step_subjects:
                 continue
             for subject in step_subjects:
-                for wallet in store.find_wallets(
+                found = store.find_wallets(
                     subjects=[subject],
                     wallet_types=[wallet_type],
                     currencies=section.currency_names,
                     at=at,
                     lock=lock,
-                ):
+                )
+                for wallet in sorted(found, key=_expiry_key):
+                    if step_source is not None and wallet.source != step_source:
+                        continue
                     if wallet.id not in seen:
                         seen.add(wallet.id)
                         ordered.append(wallet)
     return ordered
+
+
+def _expiry_key(wallet: Wallet):
+    """Soonest ``valid_until`` first, wallets that never expire last. ``sorted`` keeps store order for ties."""
+    return (wallet.valid_until is None, wallet.valid_until or datetime.min)
 
 
 def _consume(
@@ -245,9 +263,9 @@ def _archive_if_drained(store: Store, wallet: Wallet) -> bool:
 
     A windowed wallet is never archived by this rule — it replenishes every window by design. A
     wallet with an overdraft limit isn't either, since a zero balance still leaves it able to fund
-    the next request.
+    the next request. Nor is a wallet with an ``allotment``: the next plan switch adjusts it.
     """
-    if wallet.reset_config:
+    if wallet.reset_config or wallet.allotment is not None:
         return False
     if wallet.balance <= 0 and wallet.overdraft_limit is None:
         store.archive_wallet(wallet)
@@ -450,6 +468,166 @@ def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None) -> None
                 store.save_wallet(replace(wallet, balance=wallet.balance + amount))
 
 
+def credit(
+    store: Store,
+    wallet_id: object,
+    amount,
+    *,
+    guid: uuid.UUID | None = None,
+    obj: ObjectRef | None = None,
+    at: datetime | None = None,
+) -> Transaction:
+    """
+    Add ``amount`` to a wallet's balance, as a ``GRANT`` ledger entry.
+
+    ``obj`` attaches the entry to the domain object that paid for it (a payment, an order). ``guid``
+    files the entry under a fulfillment record, so :func:`unfulfill` can reverse it; a record whose
+    entry has no ``obj`` is reported by :func:`find_unattached_fulfillment_records`.
+
+    Raises :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet,
+    :class:`~allowances.errors.UnsuitableWalletError` for a windowed or expired one, and
+    ``ValueError`` for an amount that is not positive.
+    """
+    at = at or utcnow()
+    amount = Decimal(str(amount))
+    if amount <= 0:
+        raise ValueError(f"A credit must be positive, got {amount}")
+    with store.unit_of_work():
+        wallet = store.get_wallet(wallet_id, lock=True)
+        if wallet is None:
+            raise WalletNotFoundError(f"No live wallet with id {wallet_id!r}")
+        if wallet.reset_config:
+            raise UnsuitableWalletError(f"Wallet {wallet_id!r} is windowed; its balance is a per-window allotment")
+        if wallet.valid_until is not None and wallet.valid_until < at:
+            raise UnsuitableWalletError(f"Wallet {wallet_id!r} expired at {wallet.valid_until.isoformat()}")
+
+        record_guid = store.get_or_create_record(guid).guid if guid is not None else None
+        txn = store.create_transaction(
+            wallet_id=wallet.id,
+            kind=TransactionKind.GRANT,
+            amount=amount,
+            record_guid=record_guid,
+            at=at,
+        )
+        if obj is not None:
+            store.attach_object(transaction_ids=[txn.id], obj=obj)
+            txn = replace(txn, obj=obj)
+        store.save_wallet(replace(wallet, balance=wallet.balance + amount))
+    return txn
+
+
+def _open(store: Store, subject: SubjectRef, spec: WalletSpec, source: str, valid_from: datetime) -> Wallet:
+    return store.create_wallet(
+        subject=subject,
+        wallet_type=spec.wallet_type,
+        currency=spec.currency,
+        balance=spec.balance,
+        overdraft_limit=spec.overdraft_limit,
+        reset_config=spec.reset_config,
+        valid_from=valid_from,
+        valid_until=spec.valid_until,
+        source=source,
+        allotment=None if spec.on_switch == SwitchPolicy.REPLACE else spec.balance,
+    )
+
+
+def open_wallet(
+    store: Store,
+    subject: SubjectRef,
+    spec: WalletSpec,
+    *,
+    source: str,
+    effective_date: datetime | None = None,
+) -> Wallet:
+    """
+    Open one wallet for ``subject`` from ``spec``, valid from ``effective_date`` (default now).
+
+    ``source`` is stored on the wallet. A wallet with any source other than ``"plan"`` is never
+    closed or adjusted by :func:`plan_switch` — that is how a purchased credit pack outlives plan
+    changes.
+    """
+    with store.unit_of_work():
+        return _open(store, subject, spec, source, effective_date or utcnow())
+
+
+def _keepable(wallet: Wallet, spec: WalletSpec) -> bool:
+    return (
+        wallet.allotment is not None
+        and wallet.wallet_type == spec.wallet_type
+        and wallet.currency == spec.currency
+        and bool(wallet.reset_config) == bool(spec.reset_config)
+    )
+
+
+def _reallot(store: Store, wallet: Wallet, new_amount: Decimal, top_up: bool, at: datetime, **changes) -> Wallet:
+    """
+    Give a wallet with an allotment a new one. A windowed wallet's balance is the allotment; a stored
+    balance moves by the difference, booked as a ``GRANT`` entry.
+    """
+    if changes.get("reset_config", wallet.reset_config):
+        balance, allotment = new_amount, new_amount
+    else:
+        delta = new_amount - wallet.allotment
+        allotment = new_amount
+        if top_up:
+            delta = max(delta, Decimal("0"))
+            allotment = max(wallet.allotment, new_amount)
+        if delta != 0:
+            store.create_transaction(wallet_id=wallet.id, kind=TransactionKind.GRANT, amount=delta, at=at)
+        balance = wallet.balance + delta
+    adjusted = replace(wallet, balance=balance, allotment=allotment, **changes)
+    store.save_wallet(adjusted)
+    return adjusted
+
+
+def _adjust(store: Store, wallet: Wallet, spec: WalletSpec, at: datetime) -> Wallet:
+    return _reallot(
+        store,
+        wallet,
+        Decimal(str(spec.balance)),
+        spec.on_switch == SwitchPolicy.TOP_UP,
+        at,
+        overdraft_limit=spec.overdraft_limit,
+        reset_config=spec.reset_config,
+        valid_until=spec.valid_until,
+    )
+
+
+def adjust_wallet(store: Store, wallet_id: object, allotment, *, at: datetime | None = None) -> Wallet:
+    """
+    Change the allotment of a wallet that has one — a spending limit raised or lowered mid-period.
+
+    Same arithmetic as :attr:`~allowances.types.SwitchPolicy.ADJUST`: a windowed wallet gets the new
+    per-window allotment, a stored balance moves by the difference, which may be negative.
+
+    Raises :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet and
+    :class:`~allowances.errors.UnsuitableWalletError` for a wallet without an ``allotment``.
+    """
+    at = at or utcnow()
+    with store.unit_of_work():
+        wallet = store.get_wallet(wallet_id, lock=True)
+        if wallet is None:
+            raise WalletNotFoundError(f"No live wallet with id {wallet_id!r}")
+        if wallet.allotment is None:
+            raise UnsuitableWalletError(f"Wallet {wallet_id!r} has no allotment to adjust")
+        return _reallot(store, wallet, Decimal(str(allotment)), False, at)
+
+
+def consumed(store: Store, wallet_id: object, since: datetime, until: datetime) -> Decimal:
+    """
+    Net amount drawn from a wallet in ``[since, until]``: consumption minus the reversals of
+    consumption booked in that interval. Credits, plan adjustments and their reversals do not count.
+    This is the figure a host application bills for a postpaid budget wallet.
+    """
+    total = Decimal("0")
+    for txn in store.transactions_for_wallet(wallet_id=wallet_id, since=since, until=until):
+        # Consumption is always negative and a credit always positive, so a positive storno
+        # reverses a consumption and a negative one reverses a credit.
+        if txn.kind == TransactionKind.CONSUMPTION or (txn.kind == TransactionKind.STORNO and txn.amount > 0):
+            total -= txn.amount
+    return total
+
+
 def plan_switch(
     store: Store,
     subjects: dict,
@@ -457,31 +635,63 @@ def plan_switch(
     effective_date: datetime | None = None,
 ) -> list[Wallet]:
     """
-    Move subjects onto a different plan: close every wallet they currently hold and open the new
-    set, atomically.
+    Move subjects onto a different plan, atomically.
 
-    Each spec is opened once per subject, so switching a user *and* their organisation onto the
-    same plan in one call gives each their own wallets. Returns the wallets opened.
+    Only wallets with ``source == "plan"`` take part. For each spec with ``on_switch`` ``ADJUST`` or
+    ``TOP_UP``, the subject's current plan wallet of the same type and currency is kept and adjusted
+    (see :class:`~allowances.types.SwitchPolicy`); every other current plan wallet is closed at
+    ``effective_date`` and the remaining specs are opened from it.
+
+    Each spec is applied once per subject. Returns the resulting wallets, kept or opened, per
+    subject in spec order.
+
+    A future ``effective_date`` schedules the switch. A switch with an ``ADJUST`` or ``TOP_UP``
+    spec changes balances immediately and cannot be scheduled: it raises ``ValueError``.
     """
-    effective_date = effective_date or utcnow()
-    opened: list[Wallet] = []
+    now = utcnow()
+    effective_date = effective_date or now
+    keeps = [spec for spec in open_wallets if spec.on_switch != SwitchPolicy.REPLACE]
+    if keeps and effective_date > now:
+        raise ValueError("A plan switch with ADJUST or TOP_UP specs takes effect now and cannot be scheduled")
+
+    result: list[Wallet] = []
+    currencies = sorted({spec.currency for spec in keeps})
     with store.unit_of_work():
         for subject in subjects.values():
-            store.close_wallets(subject=subject, at=effective_date)
-            for spec in open_wallets:
-                opened.append(
-                    store.create_wallet(
-                        subject=subject,
-                        wallet_type=spec.wallet_type,
-                        currency=spec.currency,
-                        balance=spec.balance,
-                        overdraft_limit=spec.overdraft_limit,
-                        reset_config=spec.reset_config,
-                        valid_from=effective_date,
-                        valid_until=spec.valid_until,
+            current = []
+            if currencies:
+                current = [
+                    wallet
+                    for wallet in store.find_wallets(
+                        subjects=[subject],
+                        wallet_types=[WalletType.GRANT, WalletType.CONSUMABLE],
+                        currencies=currencies,
+                        at=effective_date,
+                        lock=True,
                     )
-                )
-    return opened
+                    if wallet.source == PLAN_SOURCE
+                ]
+            kept: dict[int, Wallet] = {}
+            for index, spec in enumerate(open_wallets):
+                if spec.on_switch == SwitchPolicy.REPLACE:
+                    continue
+                taken = {wallet.id for wallet in kept.values()}
+                match = next((w for w in current if w.id not in taken and _keepable(w, spec)), None)
+                if match is not None:
+                    kept[index] = match
+
+            store.close_wallets(
+                subject=subject,
+                at=effective_date,
+                source=PLAN_SOURCE,
+                exclude=[wallet.id for wallet in kept.values()],
+            )
+            for index, spec in enumerate(open_wallets):
+                if index in kept:
+                    result.append(_adjust(store, kept[index], spec, effective_date))
+                else:
+                    result.append(_open(store, subject, spec, PLAN_SOURCE, effective_date))
+    return result
 
 
 def find_unattached_fulfillment_records(store: Store, older_than: datetime | None = None):

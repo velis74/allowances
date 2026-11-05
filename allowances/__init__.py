@@ -18,11 +18,15 @@ from allowances.definitions import (
     FeatureSection,
 )
 from allowances.engine import (
+    adjust_wallet,
     archive_expired_wallets,
     attach,
+    consumed,
+    credit,
     effective_balance,
     find_unattached_fulfillment_records,
     fulfill,
+    open_wallet,
     peek,
     plan_switch,
     unfulfill,
@@ -32,7 +36,9 @@ from allowances.errors import (
     DefinitionNotFoundError,
     InsufficientBalanceError,
     RecordNotFoundError,
+    UnsuitableWalletError,
     UnsupportedOperationError,
+    WalletNotFoundError,
 )
 from allowances.store import Store
 from allowances.types import (
@@ -40,7 +46,9 @@ from allowances.types import (
     FulfillmentResult,
     Modifier,
     ObjectRef,
+    PLAN_SOURCE,
     SubjectRef,
+    SwitchPolicy,
     Transaction,
     TransactionKind,
     Wallet,
@@ -49,7 +57,7 @@ from allowances.types import (
 )
 from allowances.windows import window_start
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "AllowancesError",
@@ -65,20 +73,28 @@ __all__ = [
     "InsufficientBalanceError",
     "Modifier",
     "ObjectRef",
+    "PLAN_SOURCE",
     "RecordNotFoundError",
     "Store",
     "SubjectRef",
+    "SwitchPolicy",
     "Transaction",
     "TransactionKind",
+    "UnsuitableWalletError",
     "UnsupportedOperationError",
     "Wallet",
+    "WalletNotFoundError",
     "WalletSpec",
     "WalletType",
     "archive_expired_wallets",
+    "adjust_wallet",
     "attach",
+    "consumed",
+    "credit",
     "effective_balance",
     "find_unattached_fulfillment_records",
     "fulfill",
+    "open_wallet",
     "peek",
     "plan_switch",
     "unfulfill",

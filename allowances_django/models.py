@@ -103,6 +103,21 @@ class Wallet(SubjectFields):
             "balance is a plain stored amount that does not replenish."
         ),
     )
+    source = models.CharField(
+        max_length=NAME_MAX_LENGTH,
+        default="plan",
+        help_text="Where the wallet came from. plan_switch opens and closes only wallets with source 'plan'.",
+    )
+    allotment = models.DecimalField(
+        max_digits=AMOUNT_MAX_DIGITS,
+        decimal_places=AMOUNT_DECIMAL_PLACES,
+        null=True,
+        blank=True,
+        help_text=(
+            "The plan's amount for a wallet opened with an 'adjust' or 'top_up' switch policy; the next "
+            "plan switch adds the difference against it. Null for every other wallet."
+        ),
+    )
     # Not auto_now_add: the store sets it, so a backfill or a test can place a wallet in the past.
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -228,6 +243,10 @@ class WalletArchive(SubjectFields):
     )
     first_overdraft_at = models.DateTimeField(null=True, blank=True)
     reset_config = models.JSONField(null=True, blank=True)
+    source = models.CharField(max_length=NAME_MAX_LENGTH, default="plan")
+    allotment = models.DecimalField(
+        max_digits=AMOUNT_MAX_DIGITS, decimal_places=AMOUNT_DECIMAL_PLACES, null=True, blank=True
+    )
     original_created_at = models.DateTimeField()
     archived_at = models.DateTimeField(default=timezone.now)
 
