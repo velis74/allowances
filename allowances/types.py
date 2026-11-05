@@ -34,11 +34,38 @@ class WalletType(StrEnum):
 
 
 class TransactionKind(StrEnum):
-    """A grant (balance added), a consumption (balance drawn), or a storno (an earlier entry reversed)."""
+    """
+    A grant (balance added by :func:`allowances.engine.credit` or changed by a plan adjustment), a
+    consumption (balance drawn), or a storno (an earlier entry reversed).
+    """
 
     GRANT = "grant"
     CONSUMPTION = "consumption"
     STORNO = "storno"
+
+
+class SwitchPolicy(StrEnum):
+    """
+    What :func:`allowances.engine.plan_switch` does with a subject's current plan wallet of the same
+    type and currency as a :class:`WalletSpec`.
+
+    ``REPLACE`` closes it and opens a new wallet. ``ADJUST`` keeps it and adds the difference between
+    the new and the old allotment to its balance, which may be negative. ``TOP_UP`` keeps it and adds
+    only a positive difference; both record the new allotment. On a windowed wallet both set
+    the per-window allotment to the new value.
+
+    A kept wallet has no ``allotment`` when it was opened under ``REPLACE``; it is then replaced. A
+    kept wallet whose ``reset_config`` is set while the spec's is not, or the other way round, is
+    replaced too.
+    """
+
+    REPLACE = "replace"
+    ADJUST = "adjust"
+    TOP_UP = "top_up"
+
+
+#: ``Wallet.source`` of the wallets :func:`allowances.engine.plan_switch` opens and closes.
+PLAN_SOURCE = "plan"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +126,14 @@ class Wallet:
     allotment* — a constant that fulfillment never mutates — and the balance that actually governs
     decisions is computed on the fly by summing transactions inside the current window. See
     :func:`allowances.engine.effective_balance`.
+
+    ``source`` names where the wallet came from. :func:`allowances.engine.plan_switch` only opens and
+    closes wallets with ``source == "plan"``; any other value (``"purchase"``, ``"budget"``) is left
+    alone by it. ``allotment`` is the plan's amount for a wallet opened with an ``ADJUST`` or
+    ``TOP_UP`` policy, the base the next plan switch computes its difference against. It is ``None``
+    for every other wallet. ``scheduled`` is set while a plan switch with a future effective date
+    affects the wallet; it records what that switch changes, so the change applies on its date and
+    can be cancelled before it. Its content belongs to the engine.
     """
 
     id: object
@@ -112,6 +147,9 @@ class Wallet:
     overdraft_limit: Decimal | None = None
     first_overdraft_at: datetime | None = None
     reset_config: dict | None = None
+    source: str = PLAN_SOURCE
+    allotment: Decimal | None = None
+    scheduled: dict | None = None
 
     def is_valid_at(self, at: datetime) -> bool:
         if self.valid_from is not None and self.valid_from > at:
@@ -164,6 +202,9 @@ class WalletSpec:
     """
     Describes a wallet to open, without saying for whom — :func:`allowances.engine.plan_switch`
     opens one wallet per ``(subject, spec)`` pair across every subject it is given.
+
+    ``on_switch`` decides what a later plan switch does with the subject's existing plan wallet of
+    the same type and currency; see :class:`SwitchPolicy`.
     """
 
     wallet_type: WalletType
@@ -172,6 +213,7 @@ class WalletSpec:
     overdraft_limit: Decimal | None = None
     reset_config: dict | None = None
     valid_until: datetime | None = None
+    on_switch: SwitchPolicy = SwitchPolicy.REPLACE
 
 
 @dataclass

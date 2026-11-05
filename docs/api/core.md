@@ -61,7 +61,53 @@ plan_switch(store, subjects, open_wallets: Sequence[WalletSpec],
             effective_date=None) -> list[Wallet]
 ```
 
-Close every wallet these subjects hold and open the given set instead, atomically. Each spec is opened once per subject. A future `effective_date` schedules the switch rather than applying it. Returns the wallets opened.
+Move these subjects onto the plan described by `open_wallets`, atomically. Only wallets with `source == "plan"` take part. A spec with `on_switch` `ADJUST` or `TOP_UP` keeps the subject's current plan wallet of the same type and currency and adjusts it; every other current plan wallet is closed at `effective_date` and the remaining specs are opened. Each spec is applied once per subject. Returns the resulting wallets, kept or opened, per subject in spec order.
+
+A future `effective_date` schedules the switch: closing and opening take effect through validity dates, adjustments apply from that date. A pending switch for the same subject is cancelled first. See [Plan switch](/guide/plans-and-archival#plan-switch) and [Switch policies](/guide/plans-and-archival#switch-policies).
+
+### `cancel_scheduled_switch`
+
+```python
+cancel_scheduled_switch(store, subjects) -> int
+```
+
+Cancel the not-yet-effective switch of these subjects: closed wallets get their previous `valid_until` back, scheduled adjustments are dropped, wallets it would have opened end before they begin. Returns how many subjects had a switch cancelled.
+
+### `open_wallet`
+
+```python
+open_wallet(store, subject: SubjectRef, spec: WalletSpec, *, source: str,
+            effective_date=None) -> Wallet
+```
+
+Open one wallet, valid from `effective_date` (default now). `source` is stored on it; a wallet whose source is not `"plan"` is never closed or adjusted by `plan_switch`. A spec with `on_switch` `ADJUST` or `TOP_UP` records its balance as the wallet's `allotment`.
+
+### `credit`
+
+```python
+credit(store, wallet_id, amount, *, guid=None, obj: ObjectRef | None = None,
+       at=None) -> Transaction
+```
+
+Add a positive `amount` to a wallet's balance, as a `GRANT` transaction. `obj` attaches it to whatever paid for it. `guid` files it under a fulfillment record so `unfulfill(guid)` reverses it; such a record without `obj` is reported by `find_unattached_fulfillment_records`.
+
+Raises `WalletNotFoundError` for an unknown or archived wallet, `UnsuitableWalletError` for a windowed wallet or one not valid at `at`, `ValueError` for an amount that is not positive.
+
+### `adjust_wallet`
+
+```python
+adjust_wallet(store, wallet_id, allotment, *, at=None) -> Wallet
+```
+
+Give a wallet that has an `allotment` a new one, with `ADJUST` arithmetic: a windowed wallet gets the new per-window allotment, a stored balance moves by the difference (booked as a `GRANT` transaction, possibly negative). Raises `WalletNotFoundError` or, for a wallet without an allotment, `UnsuitableWalletError`.
+
+### `consumed`
+
+```python
+consumed(store, wallet_id, since, until) -> Decimal
+```
+
+Net amount drawn from a wallet in `[since, until]`: consumption minus reversals of consumption booked in that interval. Credits, adjustments and their reversals are not counted. The figure to bill for a [postpaid budget](/guide/credits-and-budgets#postpaid-budget).
 
 ### `archive_expired_wallets`
 
@@ -106,7 +152,7 @@ Same shape, for the object a fulfillment paid for.
 
 ### `Wallet`
 
-`id`, `subject`, `wallet_type`, `currency`, `balance`, `created_at`, `valid_from`, `valid_until`, `overdraft_limit`, `first_overdraft_at`, `reset_config`.
+`id`, `subject`, `wallet_type`, `currency`, `balance`, `created_at`, `valid_from`, `valid_until`, `overdraft_limit`, `first_overdraft_at`, `reset_config`, `source` (default `"plan"`, the value of `PLAN_SOURCE`), `allotment` (`None` unless opened with an `ADJUST` or `TOP_UP` policy), `scheduled` (what a not-yet-effective plan switch changes on it; written by the engine).
 
 `is_valid_at(at)` — whether fulfillment can see it.
 
@@ -118,10 +164,15 @@ Same shape, for the object a fulfillment paid for.
 
 ```python
 WalletSpec(wallet_type, currency, balance=Decimal("0"),
-           overdraft_limit=None, reset_config=None, valid_until=None)
+           overdraft_limit=None, reset_config=None, valid_until=None,
+           on_switch=SwitchPolicy.REPLACE)
 ```
 
-A wallet to open, without saying for whom. Used by `plan_switch`.
+A wallet to open, without saying for whom. Used by `plan_switch` and `open_wallet`. `on_switch` is what a plan switch does with the subject's existing plan wallet of the same type and currency.
+
+### `SwitchPolicy`
+
+`REPLACE` closes the existing wallet and opens a new one. `ADJUST` keeps it and moves its balance by *new − old allotment*, possibly below zero. `TOP_UP` keeps it and adds only a positive difference; both record the new allotment. On a windowed wallet `ADJUST` and `TOP_UP` both set the per-window allotment to the new amount. A wallet without an allotment, or one whose windowed-ness differs from the spec's, is replaced.
 
 ### `FulfillmentResult`
 
@@ -131,7 +182,7 @@ A wallet to open, without saying for whom. Used by `plan_switch`.
 
 ### `WalletType` / `TransactionKind`
 
-`WalletType.GRANT` / `CONSUMABLE`. `TransactionKind.GRANT` / `CONSUMPTION` / `STORNO`. String enums, so they compare equal to their values.
+`WalletType.GRANT` / `CONSUMABLE`. `TransactionKind.GRANT` / `CONSUMPTION` / `STORNO`. String enums, so they compare equal to their values. A `GRANT` transaction is a credit or a balance change made by a plan adjustment.
 
 ## Definitions
 
@@ -157,6 +208,8 @@ Reads the [configuration shape](/guide/concepts) from a dict. The Django adapter
 
 `name`, `grant`, `consumable`, `subjects`, `fulfillment_order`, `overdraft`.
 
+`fulfillment_order` is a list of `(wallet_type, subject_name, source)` steps — `DictProvider` parses two-element steps and bare strings into this shape with `None` for the missing parts — or a callable.
+
 `section_for(wallet_type)` returns the matching `FeatureSection` or `None`.
 
 ### `FeatureSection`
@@ -181,6 +234,8 @@ The storage port. See [How the port works](/backends/) for the obligations and [
 | `InsufficientBalanceError` | `fulfill` couldn't cover the request. Carries `.result`. |
 | `DefinitionNotFoundError` | Unknown feature or currency. Also a `KeyError`. |
 | `RecordNotFoundError` | No fulfillment record with that guid. Also a `LookupError`. |
+| `WalletNotFoundError` | No live wallet with that id. Also a `LookupError`. |
+| `UnsuitableWalletError` | The wallet can't take the operation: `credit` on a windowed wallet or one not valid now, `adjust_wallet` without an allotment. Also a `ValueError`. |
 | `UnsupportedOperationError` | A backend deliberately doesn't implement this. Also a `NotImplementedError`. |
 
 ## Windows

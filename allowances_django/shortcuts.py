@@ -22,10 +22,10 @@ from typing import Sequence
 
 from allowances import engine
 from allowances.definitions import DefinitionProvider
-from allowances.types import FulfillmentResult, WalletSpec
+from allowances.types import FulfillmentResult, Transaction, Wallet, WalletSpec
 from allowances_django.providers import SettingsProvider
 from allowances_django.store import DjangoStore
-from allowances_django.subjects import object_ref, subject_refs
+from allowances_django.subjects import object_ref, subject_ref, subject_refs
 
 
 def get_store(store: DjangoStore | None = None) -> DjangoStore:
@@ -86,15 +86,70 @@ def unfulfill(guid: uuid.UUID, *, at: datetime | None = None, store: DjangoStore
     engine.unfulfill(get_store(store), guid, at)
 
 
+def credit(
+    wallet,
+    amount,
+    *,
+    guid: uuid.UUID | None = None,
+    obj=None,
+    at: datetime | None = None,
+    store: DjangoStore | None = None,
+) -> Transaction:
+    """
+    Add ``amount`` to a wallet as a ``GRANT`` ledger entry. ``wallet`` is a wallet, a wallet row or
+    its id; ``obj`` is the model instance that paid for it.
+    """
+    return engine.credit(
+        get_store(store),
+        getattr(wallet, "id", wallet),
+        amount,
+        guid=guid,
+        obj=None if obj is None else object_ref(obj),
+        at=at,
+    )
+
+
+def adjust_wallet(wallet, allotment, *, at: datetime | None = None, store: DjangoStore | None = None) -> Wallet:
+    """Change the allotment of a wallet that has one. ``wallet`` is a wallet, a wallet row or its id."""
+    return engine.adjust_wallet(get_store(store), getattr(wallet, "id", wallet), allotment, at=at)
+
+
+def consumed(wallet, since: datetime, until: datetime, *, store: DjangoStore | None = None):
+    """Net amount drawn from ``wallet`` in ``[since, until]`` — what a postpaid budget bills."""
+    return engine.consumed(get_store(store), getattr(wallet, "id", wallet), since, until)
+
+
+def open_wallet(
+    subject,
+    spec: WalletSpec,
+    *,
+    source: str,
+    effective_date: datetime | None = None,
+    store: DjangoStore | None = None,
+) -> Wallet:
+    """Open one wallet for ``subject``. A ``source`` other than ``"plan"`` keeps it out of plan switches."""
+    return engine.open_wallet(
+        get_store(store), subject_ref(subject), spec, source=source, effective_date=effective_date
+    )
+
+
 def plan_switch(
     subjects: dict,
     open_wallets: Sequence[WalletSpec],
     effective_date: datetime | None = None,
     *,
     store: DjangoStore | None = None,
-):
-    """Close every wallet these subjects hold and open the given set instead, atomically."""
+) -> list[Wallet]:
+    """
+    Move these subjects onto the plan described by ``open_wallets``, atomically. Only wallets with
+    source ``"plan"`` are closed or adjusted; see :func:`allowances.engine.plan_switch`.
+    """
     return engine.plan_switch(get_store(store), subject_refs(subjects), open_wallets, effective_date)
+
+
+def cancel_scheduled_switch(subjects: dict, *, store: DjangoStore | None = None) -> int:
+    """Cancel the not-yet-effective plan switch of these subjects. Returns how many had one."""
+    return engine.cancel_scheduled_switch(get_store(store), subject_refs(subjects))
 
 
 def archive_expired_wallets(at: datetime | None = None, *, store: DjangoStore | None = None) -> int:

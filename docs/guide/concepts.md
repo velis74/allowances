@@ -71,8 +71,10 @@ A subject's holding of one currency, of one type (grant or consumable). A subjec
 | `overdraft_limit` | How far below zero it may go, or `None` for not at all. |
 | `first_overdraft_at` | When it first went negative. Set once, never cleared. |
 | `reset_config` | Makes it a [sliding-window](/guide/sliding-windows) wallet. |
+| `source` | Where it came from. `plan_switch` only opens and closes wallets with source `"plan"`; a `"purchase"` or `"budget"` wallet is left alone by it. |
+| `allotment` | The plan's amount, for a wallet opened with an `adjust` or `top_up` [switch policy](/guide/plans-and-archival#switch-policies). `None` otherwise. |
 
-Wallets are drawn oldest-first within a fulfillment step, so a grant that expires soon gets spent before a fresh one.
+Within a fulfillment step, the wallet that expires soonest is drawn first and wallets without `valid_until` last, so monthly plan credits are spent before purchased credits that never expire.
 
 ::: warning `balance` means two different things
 Without a `reset_config` it is the actual stored balance, drawn down by every consumption. With one it is a **per-window allotment** that fulfillment never touches, and the balance that governs decisions is computed from the transactions inside the current window. This trips people up exactly once. [Sliding windows](/guide/sliding-windows) explains it.
@@ -80,7 +82,7 @@ Without a `reset_config` it is the actual stored balance, drawn down by every co
 
 ## Transaction
 
-One signed ledger entry against a wallet: negative for consumption, positive for a grant or a storno. It records which feature caused it, which fulfillment record it belongs to, and — once attached — which domain object it paid for.
+One signed ledger entry against a wallet: negative for consumption, positive for a credit or for the storno of a consumption. A `grant` entry is a credit (`credit()`) or a balance change made by a plan adjustment; the latter may be negative. It records which feature caused it, which fulfillment record it belongs to, and — once attached — which domain object it paid for.
 
 Nothing is ever edited in place and nothing is deleted while it still matters. A reversal is a new `storno` entry pointing at the original, and a transaction can be stornoed at most once, enforced by the database rather than by hope.
 

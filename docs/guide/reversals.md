@@ -34,6 +34,8 @@ Some properties worth relying on:
 
 **An unknown guid raises.** `RecordNotFoundError`, not a silent no-op — a guid nobody ever fulfilled under means the caller has lost track of which operation it was undoing.
 
+**Credits reverse the same way.** A [`credit`](/guide/credits-and-budgets) filed under a guid gets a negative storno, which takes the amount back out of the wallet — possibly below zero, if it has been spent since.
+
 **Archived wallets are skipped.** If a wallet was drained to zero and [archived](/guide/plans-and-archival), it is gone from live storage and there is nothing left to credit. The call still succeeds.
 
 ::: warning Reversing across a window boundary

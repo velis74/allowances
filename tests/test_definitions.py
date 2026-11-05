@@ -67,10 +67,29 @@ def test_rate_for_an_unaccepted_currency_is_none(provider):
 
 def test_fulfillment_order_shorthand_expands_to_a_wildcard_wallet_type(provider):
     assert provider.get_feature("send_email").fulfillment_order == [
-        ("grant", "device"),
-        ("grant", None),
-        (None, "location"),
-        (None, "team"),
+        ("grant", "device", None),
+        ("grant", None, None),
+        (None, "location", None),
+        (None, "team", None),
+    ]
+
+
+def test_a_three_element_step_carries_its_source():
+    provider = DictProvider(
+        {
+            "features": {
+                "f": {
+                    "consumable": {"currencies": ["credits"]},
+                    "fulfillment_order": [("consumable", "user", "plan"), ("consumable", "user", "budget")],
+                }
+            },
+            "currencies": {"credits": {}},
+        }
+    )
+
+    assert provider.get_feature("f").fulfillment_order == [
+        ("consumable", "user", "plan"),
+        ("consumable", "user", "budget"),
     ]
 
 

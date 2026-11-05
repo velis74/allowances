@@ -402,3 +402,35 @@ def test_no_subjects_means_nothing_can_be_drawn(store, alice, provider):
 
     with pytest.raises(InsufficientBalanceError):
         fulfill(store, "send_email", 1, {}, provider)
+
+
+def test_within_a_step_the_soonest_expiring_wallet_is_drawn_first(store, alice, provider):
+    now = utcnow()
+    forever = open_wallet(store, alice, balance="10", source="purchase")
+    late = open_wallet(store, alice, balance="10", valid_until=now + timedelta(days=30))
+    soon = open_wallet(store, alice, balance="10", valid_until=now + timedelta(days=2))
+
+    fulfill(store, "send_email", 15, {"device": alice}, provider)
+
+    assert store.get_wallet(soon.id) is None  # drained and archived
+    assert store.get_wallet(late.id).balance == Decimal("5")
+    assert store.get_wallet(forever.id).balance == Decimal("10")
+
+
+def test_a_step_with_a_source_only_matches_wallets_of_that_source(store, alice):
+    budget = open_wallet(store, alice, balance="100", source="budget")
+    plan = open_wallet(store, alice, balance="10")
+    provider = provider_with(
+        features={
+            "send_email": {
+                "consumable": {"currencies": ["credits"]},
+                "fulfillment_order": [("consumable", "user", "plan"), ("consumable", "user", "budget")],
+            }
+        },
+        currencies=CREDITS,
+    )
+
+    result = fulfill(store, "send_email", 12, {"user": alice}, provider)
+
+    assert [t.wallet_id for t in result.transactions] == [plan.id, budget.id]
+    assert store.get_wallet(budget.id).balance == Decimal("98")

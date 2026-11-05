@@ -15,8 +15,9 @@ import pytest
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction as db_transaction
 from django.test import override_settings
+from django.utils import timezone
 
-from allowances.types import ObjectRef, SubjectRef, TransactionKind, WalletSpec, WalletType
+from allowances.types import ObjectRef, SubjectRef, SwitchPolicy, TransactionKind, WalletSpec, WalletType
 from allowances_django import shortcuts
 from allowances_django.models import (
     FulfillmentRecord,
@@ -133,6 +134,24 @@ def test_shortcut_attach_takes_a_model_instance(alice):
     txn = Transaction.objects.get(kind=TransactionKind.CONSUMPTION)
     assert txn.object_type == "auth.user"
     assert txn.object_id == str(target.pk)
+
+
+@override_settings(ALLOWANCES=CONFIG)
+def test_shortcuts_open_credit_adjust_and_report_with_model_instances(alice):
+    payment = User.objects.create(username="stands-in-for-a-payment")
+    spec = WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("0"), on_switch=SwitchPolicy.ADJUST)
+    wallet = shortcuts.open_wallet(alice, spec, source="purchase")
+
+    shortcuts.credit(wallet, "10", obj=payment)
+    shortcuts.fulfill("send_email", 3, {"device": alice})
+    adjusted = shortcuts.adjust_wallet(Wallet.objects.get(pk=wallet.id), "5")
+
+    row = Wallet.objects.get(pk=wallet.id)
+    assert (row.source, row.balance, row.allotment) == ("purchase", Decimal("12"), Decimal("5"))
+    assert adjusted.balance == Decimal("12")
+    grant = Transaction.objects.filter(kind=TransactionKind.GRANT).order_by("id").first()
+    assert (grant.object_type, grant.object_id) == ("auth.user", str(payment.pk))
+    assert shortcuts.consumed(wallet.id, row.created_at, timezone.now()) == Decimal("3")
 
 
 @override_settings(ALLOWANCES=CONFIG)

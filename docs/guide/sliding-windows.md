@@ -8,7 +8,7 @@ The obvious implementation is a scheduled job that resets balances at midnight. 
 
 Give a wallet a `reset_config` and two things change:
 
-1. Its stored `balance` becomes a **per-window allotment** — a constant that fulfillment never modifies.
+1. Its stored `balance` becomes a **per-window allotment** — fulfillment never modifies it; only a plan switch with an `adjust` or `top_up` [policy](/guide/plans-and-archival#switch-policies) and `adjust_wallet` set a new one.
 2. Its effective balance is that allotment **plus every transaction inside the current window**.
 
 Consumption entries are negative, so the balance nets down as the window fills. When the window moves on, old entries fall outside it and stop counting — the quota appears to reset, without anything having written to anything.

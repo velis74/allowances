@@ -717,3 +717,108 @@ across processes, for whom one global write lock is a bottleneck.
 deleting a helper and some rows from the CI matrix. But the claim is now in the README and in a
 passing test on every push, so it is a promise, and withdrawing it after anyone deploys on SQLite
 is a breaking change for them.
+
+## 31. Wallets have a `source`, and `plan_switch` only touches `source == "plan"`
+
+**Dilemma:** `plan_switch` closed every wallet a subject held, and it was the only public way to
+fund a wallet. Credits a customer bought outside the plan therefore had nowhere to live: a purchased
+pack opened through the store would be closed by the next plan change, losing paid-for balance.
+
+**Decision:** `Wallet.source` is a free string, default `"plan"` (`PLAN_SOURCE`). `plan_switch` opens
+wallets with that source and closes only those; `open_wallet(..., source=...)` opens any other
+source, which no plan switch ever closes. `fulfillment_order` steps take an optional third element,
+`source`, so one subject's wallets of one currency can be ordered by origin (plan before budget).
+`credit()` adds to an existing wallet as a `TransactionKind.GRANT` entry, attached to the paying
+object; with a `guid` it is reversible by `unfulfill`.
+
+**Reason:** Origin decides lifetime. A free string rather than an enum lets an application name its
+own origins (`"purchase"`, `"budget"`, `"promo"`) without a library change; only `"plan"` has
+meaning to the engine. Existing rows default to `"plan"`, so existing behaviour is unchanged.
+
+**Cost to revisit:** Medium. The field is in both backends' schemas and in the store port
+(`create_wallet`, `save_wallet`).
+
+## 32. Per-spec switch policies: `REPLACE`, `ADJUST`, `TOP_UP`
+
+**Dilemma:** Closing and reopening is wrong for two kinds of wallet. A capacity wallet (storage,
+seats) holds *limit − usage*; replacing it hands out the full new limit while usage persists, and a
+later `unfulfill` of an upload made before the switch credits the closed wallet, so the space is
+never freed. Plan credits under commercial terms like "an upgrade adds the difference, used credits
+stay used" also need the old wallet kept. Other wallets — monthly quotas that start over, boolean
+grants — are right to be replaced. Which applies is a property of the plan item, not of the
+library.
+
+**Decision:** `WalletSpec.on_switch` with three values. `REPLACE` (default) is the previous
+behaviour. `ADJUST` and `TOP_UP` keep the current plan wallet of the same type and currency and move
+its balance by the difference against a stored `Wallet.allotment` (the plan's amount when the wallet
+was opened or last adjusted); `TOP_UP` ignores a negative difference. Both record the new amount as
+the allotment, so an upgrade after a downgrade adds the difference against the downgraded plan: the
+upgrade is paid for again, and whether a switch is paid is the application's concern.
+On windowed wallets both set the per-window allotment and keep the window's history. A wallet
+without an allotment, or a windowed/non-windowed mismatch, is replaced. Wallets with an allotment are
+exempt from drained-wallet archival. `adjust_wallet()` applies `ADJUST` arithmetic outside a plan
+switch (a spending limit changed mid-period).
+
+This supersedes the "close every wallet" part of #17 (the per-subject fan-out stands) and resolves
+the open question in #10 about where `TransactionKind.GRANT` is written: by `credit()` and by
+non-windowed adjustments.
+
+**Reason:** Storing the allotment rather than deriving it from the ledger keeps the store port free
+of kind-filtered aggregates. Exempting allotment wallets from drained archival keeps two things
+working: an `ADJUST` capacity wallet at zero (storage full) must stay live so that `unfulfill` of a
+deletion frees space in it, and an exhausted `TOP_UP` wallet must still be found on upgrade, or the
+switch opens a new wallet with the full new amount instead of the difference. Such a wallet stays
+live only while its plan item does; a switch without the item or a cancellation closes it and
+`archive_expired_wallets` sweeps it, so the live table holds at most one per subject and plan item.
+
+**Constraints:** Within a static `fulfillment_order` step the engine orders wallets soonest-`valid_until`
+first (none last, store order for ties), so expiring plan credits are spent before permanent
+purchased ones; the store's `(created_at, id)` order remains its contract.
+
+**Cost to revisit:** Medium. Changing the default policy would change every existing caller's plan
+switches.
+
+## 33. Postpaid budgets are a recipe, not a feature
+
+**Dilemma:** Overage billing (a monthly allowance, then spend up to a customer-set limit, billed
+afterwards) is common. Implementing it fully means invoicing and payment-provider integration, which
+the library does not do.
+
+**Decision:** The library supplies the pieces — a `"budget"`-source wallet with an `ADJUST`
+allotment as the limit, source-filtered `fulfillment_order` steps, `adjust_wallet()` for limit
+changes, and `consumed(wallet, since, until)` (net consumption in a period, reversals of consumption
+deducted, credits and adjustments ignored) as the billing figure. `docs/guide/credits-and-budgets.md`
+shows the assembly. `consumed` needs `Store.transactions_for_wallet`, added to the port.
+
+**Reason:** Enforcement and the ledger are the library's; charging is the application's. The figure
+an invoice needs is a ledger question, so the library answers it.
+
+**Cost to revisit:** Low. Everything is additive.
+
+## 34. Scheduled plan switches are recorded on the wallets and applied lazily
+
+**Dilemma:** A downgrade or cancellation usually takes effect at the end of the paid period, so a
+switch is often decided now and effective later. Closing and opening wallets can be scheduled
+through validity dates, but an `ADJUST`/`TOP_UP` adjustment changes a stored balance, which has no
+future-dated form. A scheduled switch also has to be cancellable (the customer changes their mind),
+and validity dates alone do not say which `valid_until` a switch set and which the wallet already
+had.
+
+**Decision:** A switch with a future `effective_date` writes `Wallet.scheduled` on every wallet it
+affects: `close` (with the previous `valid_until`), `open`, or `adjust` (target allotment, policy and
+spec fields). An adjustment is applied lazily: readers (`peek`, `effective_balance`) see it from its
+date on, and the first locked operation reaching the wallet (`fulfill`, `unfulfill`, `credit`,
+`adjust_wallet`, `plan_switch`, `archive_expired_wallets`) writes it, its `GRANT` entry dated on the
+effective date. The difference is computed at that point, against the allotment the wallet has then.
+`cancel_scheduled_switch` reverts not-yet-effective records: previous `valid_until` restored,
+adjustments dropped, opened wallets given a `valid_until` before their `valid_from`. `plan_switch`
+cancels a subject's pending switch before applying a new one, so there is at most one per subject.
+`Store.close_wallets` is replaced by per-wallet `save_wallet` calls, and
+`Store.find_scheduled_wallets` finds the records.
+
+**Reason:** Lazy application keeps the property that nothing has to run on the effective date, as
+with sliding windows. Recording per wallet rather than in a separate switch table keeps the port
+small and the record next to the state it changes.
+
+**Cost to revisit:** Medium. The record format is internal to the engine, but stored; changing it
+needs a data migration for pending switches.
