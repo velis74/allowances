@@ -35,6 +35,9 @@ build-backend = "uv_build"
 module-name = ["allowances", "allowances_django"]
 module-root = ""
 
+[tool.publish]
+tests = "pytest"
+
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 # pytest-django resolves the settings module before pytest inserts rootdir into sys.path, so a bare
