@@ -736,7 +736,7 @@ own origins (`"purchase"`, `"budget"`, `"promo"`) without a library change; only
 meaning to the engine. Existing rows default to `"plan"`, so existing behaviour is unchanged.
 
 **Cost to revisit:** Medium. The field is in both backends' schemas and in the store port
-(`create_wallet`, `close_wallets`).
+(`create_wallet`, `save_wallet`).
 
 ## 32. Per-spec switch policies: `REPLACE`, `ADJUST`, `TOP_UP`
 
@@ -771,9 +771,7 @@ switch opens a new wallet with the full new amount instead of the difference. Su
 live only while its plan item does; a switch without the item or a cancellation closes it and
 `archive_expired_wallets` sweeps it, so the live table holds at most one per subject and plan item.
 
-**Constraints:** A switch with `ADJUST` or `TOP_UP` specs raises `ValueError` for a future
-`effective_date`. A stored balance cannot be changed at a future instant, so such a switch runs on
-the day. Within a static `fulfillment_order` step the engine orders wallets soonest-`valid_until`
+**Constraints:** Within a static `fulfillment_order` step the engine orders wallets soonest-`valid_until`
 first (none last, store order for ties), so expiring plan credits are spent before permanent
 purchased ones; the store's `(created_at, id)` order remains its contract.
 
@@ -796,3 +794,31 @@ shows the assembly. `consumed` needs `Store.transactions_for_wallet`, added to t
 an invoice needs is a ledger question, so the library answers it.
 
 **Cost to revisit:** Low. Everything is additive.
+
+## 34. Scheduled plan switches are recorded on the wallets and applied lazily
+
+**Dilemma:** A downgrade or cancellation usually takes effect at the end of the paid period, so a
+switch is often decided now and effective later. Closing and opening wallets can be scheduled
+through validity dates, but an `ADJUST`/`TOP_UP` adjustment changes a stored balance, which has no
+future-dated form. A scheduled switch also has to be cancellable (the customer changes their mind),
+and validity dates alone do not say which `valid_until` a switch set and which the wallet already
+had.
+
+**Decision:** A switch with a future `effective_date` writes `Wallet.scheduled` on every wallet it
+affects: `close` (with the previous `valid_until`), `open`, or `adjust` (target allotment, policy and
+spec fields). An adjustment is applied lazily: readers (`peek`, `effective_balance`) see it from its
+date on, and the first locked operation reaching the wallet (`fulfill`, `unfulfill`, `credit`,
+`adjust_wallet`, `plan_switch`, `archive_expired_wallets`) writes it, its `GRANT` entry dated on the
+effective date. The difference is computed at that point, against the allotment the wallet has then.
+`cancel_scheduled_switch` reverts not-yet-effective records: previous `valid_until` restored,
+adjustments dropped, opened wallets given a `valid_until` before their `valid_from`. `plan_switch`
+cancels a subject's pending switch before applying a new one, so there is at most one per subject.
+`Store.close_wallets` is replaced by per-wallet `save_wallet` calls, and
+`Store.find_scheduled_wallets` finds the records.
+
+**Reason:** Lazy application keeps the property that nothing has to run on the effective date, as
+with sliding windows. Recording per wallet rather than in a separate switch table keeps the port
+small and the record next to the state it changes.
+
+**Cost to revisit:** Medium. The record format is internal to the engine, but stored; changing it
+needs a data migration for pending switches.

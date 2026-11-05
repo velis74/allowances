@@ -6,7 +6,7 @@
 python manage.py migrate allowances
 ```
 
-`0002_wallet_source_and_allotment` adds `source` and `allotment` to `Wallet` and `WalletArchive`. Every existing row gets `source="plan"` and `allotment=NULL`, which keeps `plan_switch` closing and opening them exactly as before.
+`0002_wallet_source_allotment_scheduled` adds `source`, `allotment` and `scheduled` to `Wallet`, and `source` and `allotment` to `WalletArchive`. Every existing row gets `source="plan"` and `allotment=NULL`, which keeps `plan_switch` closing and opening them exactly as before.
 
 ## Wallets you opened outside a plan
 
@@ -30,7 +30,7 @@ Wallet.objects.filter(source="plan", currency="credits", valid_until__isnull=Tru
 
 Wallets with an allotment are no longer archived when drained; see [Switch policies](/guide/plans-and-archival#switch-policies).
 
-A switch with an `ADJUST` or `TOP_UP` spec cannot take a future `effective_date`.
+A switch with a future `effective_date` now records what it changes on each affected wallet (`Wallet.scheduled`), can be cancelled with `cancel_scheduled_switch`, and is cancelled by the next switch for the same subject. Switches scheduled before the upgrade carry no such record: they still take effect on their date, but they cannot be cancelled and a later switch does not undo them.
 
 ## Draw order within a step
 
@@ -49,9 +49,10 @@ def oldest_first(wallets):
 
 The store port changes:
 
-- `create_wallet` takes `source` (default `"plan"`) and `allotment` (default `None`), and the returned `Wallet` carries both.
-- `save_wallet` also persists `overdraft_limit`, `reset_config` and `allotment`.
-- `close_wallets` takes `source` (`None` = every source) and `exclude` (ids that stay open).
-- New method `transactions_for_wallet(*, wallet_id, since, until)`, ordered by `(created_at, id)`.
+- `create_wallet` takes `source` (default `"plan"`), `allotment` and `scheduled` (both default `None`), and the returned `Wallet` carries all three.
+- `save_wallet` also persists `overdraft_limit`, `reset_config`, `allotment` and `scheduled`.
+- `find_wallets` accepts `currencies=None` for every currency.
+- `close_wallets` is removed; the engine closes wallets through `save_wallet`.
+- New methods `find_scheduled_wallets(*, subject, lock=False)` and `transactions_for_wallet(*, wallet_id, since, until)`, both ordered by `(created_at, id)`.
 
 An archive should keep `source` and `allotment` along with the other wallet fields. See [Writing a backend](/backends/writing-a-backend).

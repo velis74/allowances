@@ -12,7 +12,7 @@ Everything in `allowances_django`. Requires `pip install "allowances[django]"` a
 
 ```python
 from allowances_django.shortcuts import (
-    peek, fulfill, attach, unfulfill, plan_switch,
+    peek, fulfill, attach, unfulfill, plan_switch, cancel_scheduled_switch,
     open_wallet, credit, adjust_wallet, consumed,
     archive_expired_wallets, find_unattached_fulfillment_records,
 )
@@ -25,6 +25,7 @@ fulfill(feature, quantity, subjects, *, guid=None, allow_partial=False,
 attach(guid, obj, *, store=None)
 unfulfill(guid, *, at=None, store=None)
 plan_switch(subjects, open_wallets, effective_date=None, *, store=None)
+cancel_scheduled_switch(subjects, *, store=None)
 open_wallet(subject, spec, *, source, effective_date=None, store=None)
 credit(wallet, amount, *, guid=None, obj=None, at=None, store=None)
 adjust_wallet(wallet, allotment, *, at=None, store=None)
@@ -91,7 +92,7 @@ These are a persistence detail, not the library's vocabulary — the engine neve
 
 ### `Wallet`
 
-`subject_type`, `subject_id`, `wallet_type`, `currency`, `balance`, `valid_from`, `valid_until`, `overdraft_limit`, `first_overdraft_at`, `reset_config`, `source`, `allotment`, `created_at`, `updated_at`.
+`subject_type`, `subject_id`, `wallet_type`, `currency`, `balance`, `valid_from`, `valid_until`, `overdraft_limit`, `first_overdraft_at`, `reset_config`, `source`, `allotment`, `scheduled`, `created_at`, `updated_at`.
 
 Amounts are `DecimalField(max_digits=20, decimal_places=6)`.
 

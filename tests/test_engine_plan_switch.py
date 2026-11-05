@@ -280,10 +280,3 @@ def test_a_wallet_absent_from_the_new_plan_is_closed(store, alice):
 
     assert store.get_wallet(credits_wallet.id).valid_until is None
     assert store.get_wallet(storage.id).valid_until is not None
-
-
-def test_a_keep_spec_cannot_be_scheduled(store, alice):
-    with pytest.raises(ValueError):
-        plan_switch(
-            store, {"user": alice}, [_spec("100", SwitchPolicy.TOP_UP)], effective_date=utcnow() + timedelta(days=1)
-        )

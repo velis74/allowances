@@ -147,6 +147,11 @@ def plan_switch(
     return engine.plan_switch(get_store(store), subject_refs(subjects), open_wallets, effective_date)
 
 
+def cancel_scheduled_switch(subjects: dict, *, store: DjangoStore | None = None) -> int:
+    """Cancel the not-yet-effective plan switch of these subjects. Returns how many had one."""
+    return engine.cancel_scheduled_switch(get_store(store), subject_refs(subjects))
+
+
 def archive_expired_wallets(at: datetime | None = None, *, store: DjangoStore | None = None) -> int:
     """Sweep wallets past their ``valid_until`` into the archive. Meant for a periodic job."""
     return engine.archive_expired_wallets(get_store(store), at)

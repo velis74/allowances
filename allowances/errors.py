@@ -32,8 +32,9 @@ class WalletNotFoundError(AllowancesError, LookupError):
 
 class UnsuitableWalletError(AllowancesError, ValueError):
     """
-    The wallet cannot take this operation: :func:`allowances.engine.credit` on a windowed or expired
-    wallet, or :func:`allowances.engine.adjust_wallet` on a wallet without an ``allotment``.
+    The wallet cannot take this operation: :func:`allowances.engine.credit` on a windowed wallet or one
+    not valid at the given time, or :func:`allowances.engine.adjust_wallet` on a wallet without an
+    ``allotment``.
     """
 
 

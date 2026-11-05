@@ -118,6 +118,11 @@ class Wallet(SubjectFields):
             "plan switch adds the difference against it. Null for every other wallet."
         ),
     )
+    scheduled = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="What a plan switch with a future effective date changes on this wallet. Written by the engine.",
+    )
     # Not auto_now_add: the store sets it, so a backfill or a test can place a wallet in the past.
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

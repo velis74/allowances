@@ -131,7 +131,9 @@ class Wallet:
     closes wallets with ``source == "plan"``; any other value (``"purchase"``, ``"budget"``) is left
     alone by it. ``allotment`` is the plan's amount for a wallet opened with an ``ADJUST`` or
     ``TOP_UP`` policy, the base the next plan switch computes its difference against. It is ``None``
-    for every other wallet.
+    for every other wallet. ``scheduled`` is set while a plan switch with a future effective date
+    affects the wallet; it records what that switch changes, so the change applies on its date and
+    can be cancelled before it. Its content belongs to the engine.
     """
 
     id: object
@@ -147,6 +149,7 @@ class Wallet:
     reset_config: dict | None = None
     source: str = PLAN_SOURCE
     allotment: Decimal | None = None
+    scheduled: dict | None = None
 
     def is_valid_at(self, at: datetime) -> bool:
         if self.valid_from is not None and self.valid_from > at:

@@ -31,7 +31,25 @@ Every plan wallet the subject currently holds gets `valid_until` set, and the ne
 plan_switch({"user": user}, specs, effective_date=next_billing_date)
 ```
 
-The old wallets stay valid until then and the new ones aren't visible before it. Nothing needs to run on the day. This holds for specs with the default `replace` policy; a switch that keeps wallets cannot be scheduled (see below).
+The old wallets stay valid until then and the new ones aren't visible before it, and a kept wallet's [adjustment](#switch-policies) applies from that instant. Nothing needs to run on the day. This is how a downgrade or a cancellation at the end of a paid period is expressed — a cancellation is a switch to an empty plan:
+
+```python
+plan_switch({"user": user}, [], effective_date=period_end)
+```
+
+**A scheduled switch can be cancelled** until it takes effect:
+
+```python
+from allowances_django.shortcuts import cancel_scheduled_switch
+
+cancel_scheduled_switch({"user": user})   # returns how many subjects had one
+```
+
+Wallets it would have closed get their previous `valid_until` back, adjustments it scheduled are dropped, and wallets it would have opened end before they begin (`archive_expired_wallets` sweeps them). A switch that has taken effect is not cancelled; switch again instead.
+
+**A new switch replaces a scheduled one.** Calling `plan_switch` for a subject with a switch still pending cancels the pending one first, whether the new switch is immediate or scheduled — the customer changed their mind.
+
+A scheduled switch records what it changes on each wallet it affects (`Wallet.scheduled`). An adjustment is applied lazily: `peek` and `effective_balance` see it from its effective date on, and the first operation that writes to the wallet after that date books it, dated on the effective date.
 
 ## Switch policies
 
@@ -64,7 +82,7 @@ The arithmetic needs the old plan's amount, so a wallet opened under `adjust` or
 
 The current wallet is replaced rather than kept when it has no allotment (it was opened under `replace`), or when one of the two is windowed and the other is not. A current plan wallet that no spec matches is closed.
 
-A switch with an `adjust` or `top_up` spec changes balances immediately, so it cannot take a future `effective_date` and raises `ValueError` if given one. Run it on the day — from the same job that handles the billing period.
+A scheduled `adjust` or `top_up` computes its difference on the effective date, against the allotment the wallet has then, so usage and `adjust_wallet` calls in between are accounted for.
 
 ## Archival
 

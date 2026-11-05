@@ -61,13 +61,13 @@ class Store(Protocol):
         *,
         subjects: Sequence[SubjectRef],
         wallet_types: Sequence[WalletType],
-        currencies: Sequence[str],
+        currencies: Sequence[str] | None,
         at: datetime,
         lock: bool = False,
     ) -> list[Wallet]:
         """
         Wallets belonging to any of ``subjects``, of any of ``wallet_types``, in any of
-        ``currencies``, valid at ``at`` — ordered by ``(created_at, id)``.
+        ``currencies`` (``None``: every currency), valid at ``at`` — ordered by ``(created_at, id)``.
 
         "Valid at" means ``valid_from`` is null or in the past *and* ``valid_until`` is null or in
         the future. Expired wallets are invisible to fulfillment.
@@ -84,7 +84,7 @@ class Store(Protocol):
     def save_wallet(self, wallet: Wallet) -> None:
         """
         Persist a wallet's mutable fields: ``balance``, ``first_overdraft_at``, ``valid_from``,
-        ``valid_until``, ``overdraft_limit``, ``reset_config`` and ``allotment``.
+        ``valid_until``, ``overdraft_limit``, ``reset_config``, ``allotment`` and ``scheduled``.
         """
         ...
 
@@ -101,24 +101,15 @@ class Store(Protocol):
         valid_until: datetime | None = None,
         source: str = PLAN_SOURCE,
         allotment: Decimal | None = None,
+        scheduled: dict | None = None,
     ) -> Wallet:
         """Open a new wallet and return it, with ``id`` and ``created_at`` filled in."""
         ...
 
-    def close_wallets(
-        self,
-        *,
-        subject: SubjectRef,
-        at: datetime,
-        source: str | None = None,
-        exclude: Sequence[object] = (),
-    ) -> int:
+    def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[Wallet]:
         """
-        Set ``valid_until = at`` on every wallet of ``subject`` currently valid at ``at``, making
-        them invisible to fulfillment from that instant. Returns how many were closed.
-
-        ``source`` limits this to wallets with that ``source``; ``None`` closes every source.
-        Wallets whose id is in ``exclude`` stay open.
+        Every wallet of ``subject`` whose ``scheduled`` is set, valid or not, ordered by
+        ``(created_at, id)``.
         """
         ...
 

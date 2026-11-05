@@ -16,7 +16,11 @@ Upgrade steps: [Upgrading to 0.3](https://docs.velis.si/allowances/guide/upgradi
 - `adjust_wallet()`: changes the allotment of a wallet opened with `ADJUST` or `TOP_UP`.
 - `consumed()`: net consumption of a wallet in a period, for billing postpaid budgets.
 - `fulfillment_order` steps take an optional third element, `source`.
-- `Wallet.source` and `Wallet.allotment`; Django migration `0002_wallet_source_and_allotment`.
+- Scheduled plan switches (future `effective_date`) support every switch policy, are cancelled by
+  `cancel_scheduled_switch()` until they take effect, and are replaced by the next switch for the same
+  subject.
+- `Wallet.source`, `Wallet.allotment` and `Wallet.scheduled`; Django migration
+  `0002_wallet_source_allotment_scheduled`.
 - `WalletNotFoundError`, `UnsuitableWalletError`.
 - Guide page "Credits and budgets" with recipes for prepaid credits, monthly plan credits and
   postpaid budgets.
@@ -27,9 +31,11 @@ Upgrade steps: [Upgrading to 0.3](https://docs.velis.si/allowances/guide/upgradi
 - Within a `fulfillment_order` step, wallets are drawn soonest `valid_until` first, wallets without
   one last; equal expiries keep oldest-first order.
 - Wallets with an `allotment` are not archived when drained.
-- Store port (breaking for custom backends): `create_wallet` takes `source` and `allotment`,
-  `save_wallet` also persists `overdraft_limit`, `reset_config` and `allotment`, `close_wallets`
-  takes `source` and `exclude`, new method `transactions_for_wallet`.
+- `credit()` refuses a wallet that is not yet valid.
+- Store port (breaking for custom backends): `create_wallet` takes `source`, `allotment` and
+  `scheduled`; `save_wallet` also persists `overdraft_limit`, `reset_config`, `allotment` and
+  `scheduled`; `find_wallets` accepts `currencies=None`; `close_wallets` is removed; new methods
+  `find_scheduled_wallets` and `transactions_for_wallet`.
 
 ### Fixed
 

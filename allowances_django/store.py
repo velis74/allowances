@@ -84,6 +84,7 @@ def to_wallet(row: Wallet) -> CoreWallet:
         reset_config=row.reset_config,
         source=row.source,
         allotment=row.allotment,
+        scheduled=row.scheduled,
     )
 
 
@@ -152,22 +153,21 @@ class DjangoStore:
         *,
         subjects: Sequence[SubjectRef],
         wallet_types: Sequence[WalletType],
-        currencies: Sequence[str],
+        currencies: Sequence[str] | None,
         at: datetime,
         lock: bool = False,
     ) -> list[CoreWallet]:
-        if not subjects or not wallet_types or not currencies:
+        if not subjects or not wallet_types or (currencies is not None and not currencies):
             return []
         qs = (
             self._qs(Wallet)
             .filter(_subject_q(subjects))
-            .filter(
-                wallet_type__in=[str(wallet_type) for wallet_type in wallet_types],
-                currency__in=list(currencies),
-            )
+            .filter(wallet_type__in=[str(wallet_type) for wallet_type in wallet_types])
             .filter(_validity_q(at))
             .order_by("created_at", "id")
         )
+        if currencies is not None:
+            qs = qs.filter(currency__in=list(currencies))
         if lock:
             qs = _locked(qs)
         return [to_wallet(row) for row in qs]
@@ -188,6 +188,7 @@ class DjangoStore:
             overdraft_limit=wallet.overdraft_limit,
             reset_config=wallet.reset_config,
             allotment=wallet.allotment,
+            scheduled=wallet.scheduled,
         )
 
     def create_wallet(
@@ -203,6 +204,7 @@ class DjangoStore:
         valid_until: datetime | None = None,
         source: str = PLAN_SOURCE,
         allotment: Decimal | None = None,
+        scheduled: dict | None = None,
     ) -> CoreWallet:
         row = Wallet(
             subject_type=subject.type,
@@ -216,24 +218,20 @@ class DjangoStore:
             valid_until=valid_until,
             source=source,
             allotment=None if allotment is None else Decimal(str(allotment)),
+            scheduled=scheduled,
         )
         row.save(using=self.using)
         return to_wallet(row)
 
-    def close_wallets(
-        self,
-        *,
-        subject: SubjectRef,
-        at: datetime,
-        source: str | None = None,
-        exclude: Sequence[object] = (),
-    ) -> int:
-        qs = self._qs(Wallet).filter(subject_type=subject.type, subject_id=subject.id).filter(_validity_q(at))
-        if source is not None:
-            qs = qs.filter(source=source)
-        if exclude:
-            qs = qs.exclude(pk__in=list(exclude))
-        return qs.update(valid_until=at)
+    def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[CoreWallet]:
+        qs = (
+            self._qs(Wallet)
+            .filter(subject_type=subject.type, subject_id=subject.id, scheduled__isnull=False)
+            .order_by("created_at", "id")
+        )
+        if lock:
+            qs = _locked(qs)
+        return [to_wallet(row) for row in qs]
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[CoreWallet]:
         qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lte=at).order_by("created_at", "id")

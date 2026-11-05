@@ -63,7 +63,15 @@ plan_switch(store, subjects, open_wallets: Sequence[WalletSpec],
 
 Move these subjects onto the plan described by `open_wallets`, atomically. Only wallets with `source == "plan"` take part. A spec with `on_switch` `ADJUST` or `TOP_UP` keeps the subject's current plan wallet of the same type and currency and adjusts it; every other current plan wallet is closed at `effective_date` and the remaining specs are opened. Each spec is applied once per subject. Returns the resulting wallets, kept or opened, per subject in spec order.
 
-A future `effective_date` schedules a switch of `REPLACE` specs. With any `ADJUST` or `TOP_UP` spec a future date raises `ValueError`. See [Switch policies](/guide/plans-and-archival#switch-policies).
+A future `effective_date` schedules the switch: closing and opening take effect through validity dates, adjustments apply from that date. A pending switch for the same subject is cancelled first. See [Plan switch](/guide/plans-and-archival#plan-switch) and [Switch policies](/guide/plans-and-archival#switch-policies).
+
+### `cancel_scheduled_switch`
+
+```python
+cancel_scheduled_switch(store, subjects) -> int
+```
+
+Cancel the not-yet-effective switch of these subjects: closed wallets get their previous `valid_until` back, scheduled adjustments are dropped, wallets it would have opened end before they begin. Returns how many subjects had a switch cancelled.
 
 ### `open_wallet`
 
@@ -83,7 +91,7 @@ credit(store, wallet_id, amount, *, guid=None, obj: ObjectRef | None = None,
 
 Add a positive `amount` to a wallet's balance, as a `GRANT` transaction. `obj` attaches it to whatever paid for it. `guid` files it under a fulfillment record so `unfulfill(guid)` reverses it; such a record without `obj` is reported by `find_unattached_fulfillment_records`.
 
-Raises `WalletNotFoundError` for an unknown or archived wallet, `UnsuitableWalletError` for a windowed wallet or one past its `valid_until`, `ValueError` for an amount that is not positive.
+Raises `WalletNotFoundError` for an unknown or archived wallet, `UnsuitableWalletError` for a windowed wallet or one not valid at `at`, `ValueError` for an amount that is not positive.
 
 ### `adjust_wallet`
 
@@ -144,7 +152,7 @@ Same shape, for the object a fulfillment paid for.
 
 ### `Wallet`
 
-`id`, `subject`, `wallet_type`, `currency`, `balance`, `created_at`, `valid_from`, `valid_until`, `overdraft_limit`, `first_overdraft_at`, `reset_config`, `source` (default `"plan"`, the value of `PLAN_SOURCE`), `allotment` (`None` unless opened with an `ADJUST` or `TOP_UP` policy).
+`id`, `subject`, `wallet_type`, `currency`, `balance`, `created_at`, `valid_from`, `valid_until`, `overdraft_limit`, `first_overdraft_at`, `reset_config`, `source` (default `"plan"`, the value of `PLAN_SOURCE`), `allotment` (`None` unless opened with an `ADJUST` or `TOP_UP` policy), `scheduled` (what a not-yet-effective plan switch changes on it; written by the engine).
 
 `is_valid_at(at)` — whether fulfillment can see it.
 
@@ -227,7 +235,7 @@ The storage port. See [How the port works](/backends/) for the obligations and [
 | `DefinitionNotFoundError` | Unknown feature or currency. Also a `KeyError`. |
 | `RecordNotFoundError` | No fulfillment record with that guid. Also a `LookupError`. |
 | `WalletNotFoundError` | No live wallet with that id. Also a `LookupError`. |
-| `UnsuitableWalletError` | The wallet can't take the operation: `credit` on a windowed or expired wallet, `adjust_wallet` without an allotment. Also a `ValueError`. |
+| `UnsuitableWalletError` | The wallet can't take the operation: `credit` on a windowed wallet or one not valid now, `adjust_wallet` without an allotment. Also a `ValueError`. |
 | `UnsupportedOperationError` | A backend deliberately doesn't implement this. Also a `NotImplementedError`. |
 
 ## Windows
