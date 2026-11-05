@@ -101,15 +101,15 @@ Only the plumbing is missing, and `NEXT_STEPS.md` already scopes it: a grant-onl
 ## Development
 
 ```bash
-pip install -e ".[test]"
-pytest                                 # 188 tests, both stores, no setup
-ruff check . && ruff format --check .
+uv sync
+uv run pytest                          # both stores, no setup
+uv run ruff check . && uv run ruff format --check .
 
 npm install
 npm run docs:dev
 ```
 
-No database server required: the suite defaults to a file-backed SQLite. Copy `tests/env.example.py` to `tests/env.py` to point it at a local Postgres instead, and `ALLOWANCES_TEST_DB=sqlite pytest` to go back. Both engines are supported and both are covered — including `tests/django/test_concurrency.py`, which races eight threads for the same wallet and insists it is granted exactly once.
+No database server required: the suite defaults to a file-backed SQLite. Copy `tests/env.example.py` to `tests/env.py` to point it at a local Postgres instead, and `ALLOWANCES_TEST_DB=sqlite uv run pytest` to go back. Both engines are supported and both are covered — including `tests/django/test_concurrency.py`, which races eight threads for the same wallet and insists it is granted exactly once.
 
 Locally that runs against whichever Django you have installed. CI runs the suite five times — Django 5.2 on Python 3.11, 6.0 on 3.12 and 6.1 on 3.13 against Postgres, plus each end of that range against SQLite — which is what the `Django>=5.2,<7` pin is based on.
 

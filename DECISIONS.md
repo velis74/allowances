@@ -680,7 +680,7 @@ False`), and it raises `NotSupportedError` rather than degrading quietly.
   `allowances_django/checks.py` — says so at startup when they are missing.
 - `tests/django/test_concurrency.py` proves the guarantee rather than asserting it, on whichever
   engine the suite is pointed at.
-- `tests/settings.py` defaults to a file-backed SQLite, so `pip install -e ".[test]" && pytest`
+- `tests/settings.py` defaults to a file-backed SQLite, so `uv sync && uv run pytest`
   passes on a clean checkout with no database server anywhere. `tests/env.py` selects Postgres;
   `ALLOWANCES_TEST_DB=sqlite` forces SQLite past it. CI runs both.
 
