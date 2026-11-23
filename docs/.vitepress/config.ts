@@ -1,14 +1,15 @@
-import { defineConfig } from 'vitepress'
+import { defineConfig } from 'vitepress';
 
 export default defineConfig({
   title: 'allowances',
   description:
-    'Python grants and consumable budgets, checked before an operation and recorded in an append-only ledger, and an alternative permissions implementation. Storage-agnostic, with a Django backend.',
+    'Python grants and consumable budgets, checked before an operation and recorded in an append-only ledger, ' +
+    'and an alternative permissions implementation. Storage-agnostic, with a Django backend.',
   lastUpdated: true,
 
   transformHead({ pageData, siteConfig }) {
-    const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html')
-    return [['link', { rel: 'canonical', href: `https://docs.velis.si${siteConfig.site.base}${path}` }]]
+    const path = pageData.relativePath.replace(/(^|\/)index\.md$/, '$1').replace(/\.md$/, '.html');
+    return [['link', { rel: 'canonical', href: `https://docs.velis.si${siteConfig.site.base}${path}` }]];
   },
 
   themeConfig: {
@@ -80,4 +81,4 @@ export default defineConfig({
       message: 'MIT licensed.',
     },
   },
-})
+});

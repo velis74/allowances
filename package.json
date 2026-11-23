@@ -2,13 +2,28 @@
   "name": "allowances-docs",
   "version": "0.4.0",
   "private": true,
+  "type": "module",
   "description": "Documentation site for the allowances library.",
+  "author": "Jure Erznožnik <jure.erznoznik@velis.si>",
+  "license": "MIT",
+  "homepage": "https://docs.velis.si/allowances",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/velis74/allowances.git"
+  },
+  "bugs": {
+    "url": "https://github.com/velis74/allowances/issues"
+  },
   "scripts": {
+    "lint": "node scripts/lint.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
   },
   "devDependencies": {
+    "eslint-config-velis": "^2.0.12",
+    "markdownlint-cli2": "^0.18.1",
+    "typescript": "^5",
     "vitepress": "^1.6.3"
   }
 }
