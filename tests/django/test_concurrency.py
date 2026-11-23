@@ -1,15 +1,13 @@
 """
-The claim the rest of the library rests on: two callers spending the same wallet at the same
-instant cannot both be granted the same balance.
+Concurrent fulfilment: two callers spending the same wallet at the same time cannot both be
+granted the same balance.
 
-This is the one property that cannot be proved by reading the code, because it is the database
-enforcing it and each engine enforces it differently. Postgres locks the wallet rows for the
-duration of the transaction. SQLite has no row lock at all and serialises whole transactions
-instead. These tests run against whichever engine the suite is configured for, and pass on both —
-that equivalence is the entire reason SQLite is supported rather than merely tolerated.
+The database enforces this, and each engine enforces it differently. PostgreSQL locks the wallet
+rows for the duration of the transaction. SQLite has no row locks and serialises whole
+transactions. These tests run against the engine the suite is configured for and must pass on both.
 
-They need real committed transactions, hence ``transaction=True`` and the per-thread connection
-teardown: threads get their own connection, and pytest-django only cleans up the main one.
+They need committed transactions, hence ``transaction=True`` and the per-thread connection
+teardown: each thread has its own connection, and pytest-django closes only the main one.
 """
 
 import threading
@@ -48,10 +46,10 @@ def concurrent_provider():
 
 def run_concurrently(work, count=WORKERS):
     """
-    Fire ``count`` threads at ``work`` and release them together, returning what each one did.
+    Run ``work`` in ``count`` threads released together; return each result or raised exception.
 
-    The barrier matters: without it the threads start far enough apart that the first finishes
-    before the last begins, and the test passes for the wrong reason.
+    Without the barrier the first thread can finish before the last starts, and the calls do not
+    overlap.
     """
     barrier = threading.Barrier(count)
     outcomes = [None] * count
@@ -60,7 +58,7 @@ def run_concurrently(work, count=WORKERS):
         try:
             barrier.wait()
             outcomes[index] = work(index)
-        except Exception as exc:  # recorded, not raised — the assertions below judge it
+        except Exception as exc:  # returned, not raised
             outcomes[index] = exc
         finally:
             connections.close_all()
@@ -103,8 +101,8 @@ def test_concurrent_fulfill_grants_the_balance_exactly_once(concurrent_provider)
     assert len(granted) == 5
     assert all(o.satisfied for o in granted)
 
-    # The wallet drained to exactly zero, and every unit that left it is on the ledger. A lost
-    # update would show up as either a negative balance or fewer transactions than winners.
+    # Balance exactly zero and one transaction per granted call; a lost update gives a negative
+    # balance or fewer transactions.
     assert Wallet.objects.get(pk=wallet.id).balance == Decimal("0")
     assert Transaction.objects.filter(wallet_id=wallet.id).count() == 5
     assert sum(t.amount for t in Transaction.objects.filter(wallet_id=wallet.id)) == Decimal("-10")
@@ -112,13 +110,13 @@ def test_concurrent_fulfill_grants_the_balance_exactly_once(concurrent_provider)
 
 def test_concurrent_fulfill_across_two_wallets_does_not_double_draw(concurrent_provider):
     """
-    The same guarantee where it is easiest to lose: a request that spans two wallets, so each
-    caller holds one while it needs the other.
+    The same guarantee for requests that span two wallets, where each caller holds a lock on one
+    while it needs the other.
     """
     subject = SubjectRef("auth.user", 1)
     store = DjangoStore()
-    # Five and seven rather than six and six: with an even split every request of three fits
-    # inside one wallet and never spans the pair, which is the case being tested.
+    # Unequal balances: with six and six every request of three fits in one wallet and none
+    # spans both.
     first, second = (
         store.create_wallet(
             subject=subject,
@@ -148,9 +146,8 @@ def test_concurrent_fulfill_across_two_wallets_does_not_double_draw(concurrent_p
     assert len(balances) == 2
     assert all(balance >= 0 for balance in balances.values())
 
-    # The invariant, rather than a transaction count: how many rows four grants take depends on
-    # the order the winners happened to arrive in. What must hold is that the ledger accounts for
-    # every unit that left, and that the two agree with what the callers were told they got.
+    # The row count depends on arrival order; the ledger sum must equal the balance drop and the
+    # total granted.
     drawn = -sum(t.amount for t in Transaction.objects.filter(wallet_id__in=[first.id, second.id]))
     assert drawn == Decimal("12") - sum(balances.values())
     assert drawn == sum(o.granted for o in granted)

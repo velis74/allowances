@@ -1,9 +1,8 @@
 """
-What only the Django adapter can be asked about: turning model instances into references,
-the shortcut API, database-level guarantees, and the archive tables.
+Django adapter specifics: model instances to references, the shortcut API, database-level
+guarantees and the archive tables.
 
-Engine behaviour is not retested here — ``tests/test_engine_*.py`` already runs all of it against
-``DjangoStore``.
+Engine behaviour is tested in ``tests/test_engine_*.py``, which runs against ``DjangoStore`` too.
 """
 
 import uuid
@@ -199,7 +198,7 @@ def test_a_transaction_can_only_be_stornoed_once(alice, provider):
 
 
 def test_subject_columns_hold_a_uuid_primary_key_without_complaint():
-    # The old ContentType schema stored object ids in a PositiveBigIntegerField, which ruled this out.
+    # Subject ids are stored as text, so a UUID primary key fits.
     store = DjangoStore()
     subject = SubjectRef("billing.account", uuid.uuid4())
 

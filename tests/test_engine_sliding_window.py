@@ -1,4 +1,4 @@
-"""Sliding-window wallets: quota that appears to reset because old consumption ages out."""
+"""Sliding-window wallets: available quota counts only consumption inside the window."""
 
 from datetime import timedelta
 from decimal import Decimal
@@ -89,6 +89,6 @@ def test_a_reversal_inside_the_window_restores_the_windowed_balance(store, alice
 
     unfulfill(store, result.guid)
 
-    # The storno lands inside the same window and nets the consumption back out.
+    # The storno falls inside the same window and offsets the consumption.
     assert effective_balance(store, store.get_wallet(wallet.id)) == Decimal("100")
     assert store.get_wallet(wallet.id).balance == Decimal("100")

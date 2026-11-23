@@ -1,14 +1,12 @@
 """
 Shared fixtures.
 
-The important one is ``store``: every engine test runs twice, once against ``MemoryStore`` and once
-against ``DjangoStore``. That is the point of the port — behaviour that differs between the two is
-a bug in one of them, and this suite is where it shows up.
+``store`` runs every engine test twice, once against ``MemoryStore`` and once against
+``DjangoStore``. Behaviour that differs between the two backends is a bug in one of them.
 
-Subjects are plain :class:`~allowances.types.SubjectRef` values rather than real model instances.
-No backend needs the object itself, only the reference, so the engine tests don't have to create
-users. Converting instances to references is the Django adapter's job and is tested in
-``tests/django/``.
+Subjects are plain :class:`~allowances.types.SubjectRef` values, not model instances: backends
+need only the reference, so the engine tests create no users. Converting instances to references
+is tested in ``tests/django/``.
 """
 
 from decimal import Decimal
@@ -23,11 +21,9 @@ from allowances.types import SubjectRef, WalletType
 @pytest.fixture(
     params=[
         pytest.param("memory"),
-        # The marker has to ride on the parameter rather than be requested from inside the fixture
-        # body: pytest-django decides whether to set up (and roll back) a test database while
-        # collecting markers, long before any fixture function runs. Asking for the `db` fixture
-        # after the fact leaves the blocker disarmed and the writes land in the *development*
-        # database instead — silently, and green.
+        # The django_db marker goes on the parameter: pytest-django sets up the test database from
+        # markers at collection time. Requesting `db` inside the fixture is too late, and writes go
+        # to the development database without an error.
         pytest.param("django", marks=pytest.mark.django_db),
     ]
 )
@@ -36,7 +32,7 @@ def store(request):
     if request.param == "memory":
         return MemoryStore()
 
-    # Imported lazily so the memory parametrisation needs no database at all.
+    # Imported lazily so the memory parametrisation needs no database.
     from allowances_django.store import DjangoStore
 
     return DjangoStore()

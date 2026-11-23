@@ -1,4 +1,4 @@
-"""``attach`` and ``unfulfill`` — closing the loop after a fulfillment, and undoing one."""
+"""``attach`` and ``unfulfill``: linking a fulfilment to its object, and reversing one."""
 
 import uuid
 
@@ -117,8 +117,7 @@ def test_unfulfill_on_an_unknown_guid_raises(store):
 
 
 def test_unfulfill_skips_transactions_whose_wallet_was_archived(store, alice, provider):
-    # Drained to exactly zero, so the wallet is archived on the spot and there is nothing left to
-    # credit back. The call must still succeed rather than fail on the missing wallet.
+    # The wallet drains to zero and is archived; unfulfill succeeds without a live wallet.
     wallet = open_wallet(store, alice, balance="3")
     result = fulfill(store, "send_email", 3, {"device": alice}, provider)
     assert store.get_wallet(wallet.id) is None
