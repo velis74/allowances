@@ -210,7 +210,7 @@ def cancel_scheduled_switch(subjects: dict, *, store: DjangoStore | None = None)
 
 
 def archive_expired_wallets(at: datetime | None = None, *, store: DjangoStore | None = None) -> int:
-    """Archive wallets whose ``valid_until`` has passed. Returns how many were archived."""
+    """Archive wallets whose ``valid_until`` is at or before ``at``. Returns how many were archived."""
     return engine.archive_expired_wallets(get_store(store), at)
 
 

@@ -43,8 +43,8 @@ MEMBERSHIP_LOCK_NAME = "membership"
 
 
 def _validity_q(at: datetime) -> Q:
-    """Rows valid at ``at``: ``valid_from`` empty or not after it, ``valid_until`` empty or not before it."""
-    return (Q(valid_from__isnull=True) | Q(valid_from__lte=at)) & (Q(valid_until__isnull=True) | Q(valid_until__gte=at))
+    """Rows valid at ``at``: ``valid_from`` empty or not after it, ``valid_until`` empty or after it."""
+    return (Q(valid_from__isnull=True) | Q(valid_from__lte=at)) & (Q(valid_until__isnull=True) | Q(valid_until__gt=at))
 
 
 def _subject_q(subjects: Sequence[SubjectRef]) -> Q:
@@ -248,7 +248,7 @@ class DjangoStore:
         return [to_wallet(row) for row in qs]
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[CoreWallet]:
-        qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lt=at).order_by("created_at", "id")
+        qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lte=at).order_by("created_at", "id")
         if lock:
             qs = _locked(qs)
         return [to_wallet(row) for row in qs]

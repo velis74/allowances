@@ -153,7 +153,7 @@ class Wallet:
     def is_valid_at(self, at: datetime) -> bool:
         if self.valid_from is not None and self.valid_from > at:
             return False
-        if self.valid_until is not None and self.valid_until < at:
+        if self.valid_until is not None and self.valid_until <= at:
             return False
         return True
 
