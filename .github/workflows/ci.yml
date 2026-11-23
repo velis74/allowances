@@ -55,6 +55,11 @@ jobs:
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
 
+      - name: Generated adorm models are up to date
+        run: >-
+          uv run --no-sync adorm generate --check --settings tests.settings
+          --output allowances_adorm/models --line-length 120 allowances
+
       - name: Write test database credentials
         # tests/settings.py uses SQLite when tests/env.py (gitignored) is absent.
         if: matrix.db == 'postgres'
