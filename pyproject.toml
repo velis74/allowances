@@ -1,7 +1,7 @@
 [project]
 name = "allowances"
 version = "0.4.0"
-description = "Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend."
+description = "Grants and consumable budgets, checked before an operation and recorded in an append-only ledger, and an alternative permissions implementation. Storage-agnostic, with a Django backend."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

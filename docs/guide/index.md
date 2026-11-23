@@ -86,5 +86,7 @@ The engine does not depend on either layer's storage; it runs unchanged on Postg
 
 - [Getting started](/guide/getting-started) — install it and make one fulfilment call.
 - [Concepts](/guide/concepts) — subjects, currencies, features, wallets, transactions.
+- [Scope and design](/guide/design) — what the library is for, what it leaves to the application, and its main
+  design decisions.
 - [How the port works](/backends/) — the store interface and backends.
 - [Permissions quick start](/guide/permissions-quick-start) — Django permissions answered from allowances.

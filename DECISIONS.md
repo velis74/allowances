@@ -59,11 +59,10 @@ or reversal)" and separately calls reversals "storno transactions" — two diffe
 same third kind.
 
 **Decision:** Used `storno` (not `reversal`) as the third choice value, matching the field name
-`storno_of` that the README uses explicitly, and matching the KlubIS billing module's own
-established vocabulary (`Storno` / `CANCELLED`) for the same concept in that project.
+`storno_of` that the README uses explicitly.
 
 **Reason:** Consistency with the one concrete identifier the README does give
-(`storno_of`), and with the KlubIS codebase that consumes this library.
+(`storno_of`).
 
 **Cost to revisit:** Low — it's a `TextChoices` value, a rename is a one-line migration plus a
 data migration if any rows exist.
@@ -130,18 +129,17 @@ only six models and splitting them would add indirection without benefit.
 path has underscores) and keeps the integration point predictable: `INSTALLED_APPS
 += ["allowances_django"]`.
 
-**Cost to revisit:** Very low pre-1.0, but a rename after publishing to PyPI/being pinned by
-KlubIS would be a breaking change for that consumer.
+**Cost to revisit:** Very low pre-1.0, but a rename after publishing to PyPI is a breaking change for
+every consumer.
 
 ## 9. Test database: Postgres, not SQLite
 
 **Dilemma:** README doesn't mandate a test database engine.
 
-**Decision:** Postgres (`tests/env.py`, gitignored, mirrors the `klubis-novi` `setup/env.py`
-convention; template in `tests/env.example.py`), using a local Postgres role, but two dedicated
-databases (`allowances`, `test_allowances`) — never the host database itself.
+**Decision:** Postgres (`tests/env.py`, gitignored; template in `tests/env.example.py`), using a
+local Postgres role, but two dedicated databases (`allowances`, `test_allowances`) — never the host database itself.
 
-**Reason:** The first consumer's production database is Postgres (as is implied by this library's
+**Reason:** Production Django deployments typically run on Postgres (as is implied by this library's
 `JSONField`/`Decimal` usage), and SQLite's looser type affinity and different `JSONField` backing can
 mask precision/constraint bugs (e.g. the `UniqueConstraint` with a `condition=` on
 `Transaction.storno_of` relies on partial-index support, which SQLite via Django does support but is
@@ -182,7 +180,7 @@ wallet — see README "Out of Scope" → "Granting wallets... is the responsibil
 application") as opposed to "a consumption event that happened to come from a grant-type wallet".
 
 **Cost to revisit:** High: `_consume()` relies on it. Making grant wallets non-decrementing boolean
-gates needs a separate branch for `WalletType.GRANT` in `_consume()`/`_build_ordered_wallets()`, not
+gates needs a separate branch for `WalletType.GRANT` in `_consume()`/`_ordered_wallets()`, not
 just a priority-ordering role.
 
 ## 11. Several modifiers combine as `max(factors)`
@@ -192,13 +190,13 @@ multiple modifiers apply, the most favourable (`max`) is used." A factor of 0.5 
 1.0, so the smaller factor could be read as "more favourable" to the subject — which would suggest
 `min()`, not `max()`.
 
-**Decision:** Implemented as written: `_max_modifier_factor()` returns `max(factors)`.
+**Decision:** Implemented as written: `_modifier_factor()` returns `max(factors)`.
 
 **Reason:** The README parenthesises `(max)` immediately after "most favourable", defining "most
 favourable" as `max`, and the engine follows that definition.
 
 **Cost to revisit:** Low — `max(factors)` → `min(factors)` is a one-line change in
-`_max_modifier_factor()`; no schema impact. Under `max()`, a modifier below 1 (a discount) takes
+`_modifier_factor()`; no schema impact. Under `max()`, a modifier below 1 (a discount) takes
 effect only when no other modifier with a larger factor applies to the same request.
 
 ## 12. Overdraft: the feature flag gates *whether* a second pass runs, `overdraft_limit` *which* wallets
@@ -324,7 +322,7 @@ wallet's transactions therefore fails once a wallet has both an original and its
 because the storno's `storno_of` FK protects the original from deletion regardless of the storno also
 being scheduled for deletion.
 
-**Decision:** `_archive_wallet()` explicitly deletes all storno transactions for the wallet (the
+**Decision:** `DjangoStore.archive_wallet()` explicitly deletes all storno transactions for the wallet (the
 referencing side of `storno_of`) *before* calling `wallet.delete()`, so nothing is left pointing at
 an original by the time the cascade runs.
 
@@ -332,7 +330,7 @@ an original by the time the cascade runs.
 concern 1, and `unfulfill()`'s own `.exclude(kind=STORNO)` guard, both prevent it), so a single flat
 "delete every storno row first" pass is sufficient — no general topological-delete routine is needed.
 
-**Cost to revisit:** Very low — an implementation detail inside `_archive_wallet()`; it needs
+**Cost to revisit:** Very low — an implementation detail inside `DjangoStore.archive_wallet()`; it needs
 revisiting only if multi-level storno chains are introduced.
 
 ## 17. `plan_switch` fan-out: every subject gets its own copy of every `WalletSpec`
@@ -378,9 +376,8 @@ current behaviour (nothing implicit happens) is a strict subset.
 
 ---
 
-Decision made while integrating the library into its first consumer, KlubIS (schema-per-tenant, `django-tenants`).
-Found by running the consumer's backend test suite after adding `allowances_django` to its `TENANT_APPS`. The
-problem is not specific to that consumer, so it is recorded here.
+Decision made while integrating the library into a schema-per-tenant deployment with `django-tenants`, with
+`allowances_django` in its `TENANT_APPS`.
 
 ## 19. `ContentType` foreign keys use `db_constraint=False`
 
@@ -397,10 +394,10 @@ while a per-tenant host installs `allowances_django` once per tenant schema, bec
 their own `wallet`/`transaction`/... tables, all with real FKs to the *one* shared `content_type`
 table. Postgres creates such cross-schema FKs but refuses to `TRUNCATE` the shared table —
 `FeatureNotSupported: cannot truncate a table referenced in a foreign key constraint` — once a second
-schema contains an `allowances_django_wallet` table, even an empty one. In the consumer's test suite,
-any `transaction=True` test that flushes the `public` schema (i.e. any test of a `SHARED_APPS` model,
-e.g. `users`, `clubs`, `competitions`) failed at teardown once a tenant schema with
-`allowances_django` migrated into it existed for the session.
+schema contains an `allowances_django_wallet` table, even an empty one. In such a deployment's test
+suite, any `transaction=True` test that flushed the `public` schema (any test of a `SHARED_APPS` model)
+failed at teardown once a tenant schema with `allowances_django` migrated into it existed for the
+session.
 
 **Decision:** All four `ForeignKey(ContentType, ...)` fields pass `db_constraint=False`. The
 relation still works for every ORM purpose this app needs (`Wallet.subject`, `select_related`,
@@ -414,16 +411,17 @@ enforcement is not needed. The alternative — forcing every schema-per-tenant h
 `django.contrib.contenttypes` as a per-tenant app so the FK stays same-schema — would mean a separate
 `ContentType` catalogue per tenant, which breaks `ContentType.objects.get_for_model()` returning a
 stable, cross-schema-comparable id for the same Python class, and contradicts the `django-tenants`
-layout, which keeps `contenttypes` shared. `db_constraint=False` is the convention KlubIS already
-uses for its own cross-schema references (its `billing-module.md` design doc, chapter 4, names it for
-this case), so the library follows the consumer's convention.
+layout, which keeps `contenttypes` shared. `db_constraint=False` is the common convention for
+cross-schema references in schema-per-tenant deployments.
 
 **Cost to revisit:** Low for this app's own code and tests — a field-option change plus one
 migration; no query or business-logic path relied on a real FK's behaviour. **Medium for any
 already-deployed consumer with existing data**: a project that installed this app in a single-schema
 layout and relies on `ON DELETE CASCADE`/`SET NULL` running at the database level (e.g.
-bulk-deleting rows through raw SQL that bypasses the ORM) would need to re-verify that assumption. No
-such consumer exists yet (KlubIS is the first).
+bulk-deleting rows through raw SQL that bypasses the ORM) would need to re-verify that assumption.
+
+> **Superseded by [22](#_22-subjects-are-two-charfields-not-a-genericforeignkey).** Subjects are two `CharField`s;
+> no `ContentType` foreign key exists.
 
 ---
 
