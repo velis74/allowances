@@ -13,9 +13,7 @@ class SettingsProvider(DictProvider):
     """
     Reads ``settings.ALLOWANCES``.
 
-    A ``config`` dict may be passed instead, bypassing settings entirely — useful in tests, and for
-    applications whose definitions are narrower than a global settings module: per-tenant
-    configuration assembled at request time, or a plan fetched from a remote service and cached.
+    A ``config`` dict passed to the constructor is used instead of settings.
     """
 
     @property

@@ -1,8 +1,7 @@
 """
-Deployment checks specific to this app.
+Deployment checks of the Django app.
 
-There is exactly one, and it exists because SQLite is supported but has a single configuration
-switch that decides whether concurrent fulfillment waits or raises.
+``allowances.W001``: an SQLite database whose ``transaction_mode`` is not ``IMMEDIATE`` or ``EXCLUSIVE``.
 """
 
 from __future__ import annotations
@@ -21,14 +20,13 @@ HINT = (
 
 def check_sqlite_transaction_mode(app_configs, **kwargs):
     """
-    SQLite has no ``SELECT ... FOR UPDATE``; it serialises writers instead. A ``DEFERRED``
-    transaction — Django's default — only takes that write lock when it first writes, by which
-    point it may have read a balance another transaction has already changed underneath it.
+    Warn for each SQLite database whose ``transaction_mode`` is not ``IMMEDIATE`` or ``EXCLUSIVE``.
 
-    SQLite catches that itself and fails the write rather than committing a stale balance, so
-    the ledger stays correct either way. But the failure surfaces as ``OperationalError:
-    database is locked`` in the middle of a ``fulfill``, which is not a thing to discover in
-    production. ``IMMEDIATE`` takes the lock up front, so the second caller waits its turn.
+    SQLite has no ``SELECT ... FOR UPDATE`` and serialises writers. A ``DEFERRED`` transaction
+    (Django's default) takes the write lock on its first write, after it may have read a balance that
+    another transaction has changed. SQLite then fails the write with ``OperationalError: database is
+    locked`` inside ``fulfill``; no stale balance is committed. ``IMMEDIATE`` takes the lock at
+    ``BEGIN``, so a concurrent ``fulfill`` waits for the lock.
     """
     problems = []
     for alias, config in settings.DATABASES.items():
