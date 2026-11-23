@@ -1,29 +1,28 @@
 """
 The storage port.
 
-This is the whole surface the engine needs from persistence — twenty-two methods. Implement it and
-the engine runs against your storage unchanged. Two implementations ship with the library:
+The persistence interface of the engine. Two implementations ship with the library:
 :class:`allowances.backends.memory.MemoryStore` and ``allowances_django.store.DjangoStore``.
 
-Three things every implementation owes the engine:
+Every implementation guarantees:
 
-**Ordering.** Wallets come back oldest-first, by ``(created_at, id)``. The engine treats the order
-it receives as the tie-breaker within one ``fulfillment_order`` step, so an unstable order means
-non-deterministic draws.
+**Ordering.** Wallets are returned oldest first, by ``(created_at, id)``. The engine uses this order
+as the tie-breaker within one ``fulfillment_order`` step; an unstable order makes draws
+non-deterministic.
 
 **Locking.** ``unit_of_work()`` must make everything inside it atomic, and a locked read must
 prevent a concurrent operation from changing the same rows until the block ends. Without both, two
-simultaneous ``fulfill()`` calls can each see the same balance and overdraw it. A backend that
-genuinely cannot lock should say so in its documentation rather than pretend.
+concurrent ``fulfill()`` calls can read the same balance and overdraw it. A backend that cannot
+lock states this limitation in its documentation.
 
 **Lock order.** An engine operation that locks wallets locks all of them in one
 :meth:`Store.lock_wallets` call, before reading the balances it relies on, and locks no further
 wallet afterwards. ``lock_wallets`` takes the locks in ascending wallet id, so two operations never
 wait for each other in a cycle. Wallet ids of one store must therefore be mutually comparable.
-A fulfillment record is locked before its wallets.
+A fulfilment record is locked before its wallets.
 
-A backend that cannot support an operation at all should raise
-:class:`allowances.errors.UnsupportedOperationError` rather than silently doing nothing.
+A backend raises :class:`allowances.errors.UnsupportedOperationError` for an operation it does not
+support.
 """
 
 from __future__ import annotations
@@ -49,14 +48,14 @@ from allowances.types import (
 
 @runtime_checkable
 class Store(Protocol):
-    """Everything the engine needs from persistence."""
+    """The persistence operations the engine uses."""
 
     # -- transactions / locking ----------------------------------------------------------------
 
     def unit_of_work(self) -> AbstractContextManager[None]:
         """
-        Make everything inside the block atomic: it all commits, or none of it does. Must be safe
-        to nest — the engine opens one, and a caller may already have opened another around it. A
+        Make everything inside the block atomic: it all commits, or none of it does. Blocks nest:
+        the engine opens one, possibly inside a block the caller opened. A
         nested block that raises discards its own writes and leaves the outer block's intact.
         """
         ...
@@ -76,8 +75,7 @@ class Store(Protocol):
         Wallets belonging to any of ``subjects``, of any of ``wallet_types``, in any of
         ``currencies`` (``None``: every currency), valid at ``at`` — ordered by ``(created_at, id)``.
 
-        "Valid at" means ``valid_from`` is null or in the past *and* ``valid_until`` is null or in
-        the future. Expired wallets are invisible to fulfillment.
+        "Valid at" means ``valid_from`` is null or ``<= at``, and ``valid_until`` is null or ``>= at``.
         """
         ...
 
@@ -90,8 +88,7 @@ class Store(Protocol):
 
     def get_wallet(self, wallet_id: object, *, lock: bool = False) -> Wallet | None:
         """
-        Fetch one wallet by id, or ``None`` if it is gone. Reversals need this: a transaction knows
-        only which wallet it drew from, and an archived wallet is legitimately absent.
+        Fetch one wallet by id; ``None`` for an archived or unknown wallet.
         """
         ...
 
@@ -128,14 +125,13 @@ class Store(Protocol):
         ...
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
-        """Wallets whose ``valid_until`` has passed — candidates for archival."""
+        """Wallets whose ``valid_until`` is set and ``<= at``, ordered by ``(created_at, id)``."""
         ...
 
     def archive_wallet(self, wallet: Wallet) -> None:
         """
-        Move a wallet and its transactions out of live storage into whatever archive this backend
-        keeps, then delete the live rows. What the archive looks like is entirely the backend's
-        business — the core only decides *when* to archive, never *how* it is stored.
+        Move a wallet and its transactions to the backend's archive and delete the live rows. The
+        archive format is backend-specific.
         """
         ...
 
@@ -144,8 +140,8 @@ class Store(Protocol):
     def sum_transactions(self, *, wallet_id: object, since: datetime, until: datetime) -> Decimal:
         """
         Sum of ``amount`` over the wallet's transactions in ``[since, until]``, or zero if there
-        are none. Drives sliding-window balances, so it is on the hot path of every fulfillment
-        against a windowed wallet.
+        are none. Runs on every fulfilment against a windowed wallet; implementations answer it with
+        an indexed query.
         """
         ...
 
@@ -169,45 +165,43 @@ class Store(Protocol):
         Append a ledger entry. ``amount`` is signed; ``actor`` is the subject on whose behalf the
         entry is made.
 
-        A transaction may be stornoed at most once — a backend should enforce that with a
-        uniqueness guarantee on ``storno_of_id`` rather than trusting callers, since a lost race
-        here silently doubles a refund.
+        A transaction is stornoed at most once; the backend enforces this with a uniqueness
+        constraint on ``storno_of_id``. Without it, two concurrent reversals refund twice.
         """
         ...
 
     def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[Transaction]:
         """
-        Every transaction under one fulfillment record, ordered by ``(created_at, id)`` — storno
-        rows included, so the engine can work out for itself what has already been reversed.
+        Every transaction under one fulfilment record, storno rows included, ordered by
+        ``(created_at, id)``.
         """
         ...
 
     def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
-        """Point the given transactions at the domain object they turned out to pay for."""
+        """Set ``obj`` on the given transactions."""
         ...
 
-    # -- fulfillment records -------------------------------------------------------------------
+    # -- fulfilment records -------------------------------------------------------------------
 
     def get_or_create_record(self, guid: uuid.UUID | None = None) -> FulfillmentRecord:
         """
         Fetch the record with this ``guid``, creating it if absent. ``guid=None`` always creates a
-        fresh one — that is how a caller says "this is its own operation".
+        new record with a new guid.
         """
         ...
 
     def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> FulfillmentRecord | None:
         """
-        Fetch a record, or ``None``. With ``lock=True`` this serialises concurrent operations on
-        the same record — which is what stops two simultaneous ``unfulfill()`` calls from each
-        deciding the same transaction still needs reversing.
+        Fetch a record, or ``None``. ``lock=True`` serialises concurrent operations on the record,
+        so two concurrent ``unfulfill()`` calls cannot reverse the same transaction twice.
         """
         ...
 
     def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[FulfillmentRecord]:
         """
-        Records holding at least one ``CONSUMPTION`` transaction that never got a domain object
-        attached — a fulfillment whose business operation may have died halfway. Feeds recovery jobs.
-        Other kinds (credits, transfers) are complete when written and never make a record match.
+        Records holding at least one ``CONSUMPTION`` transaction without an attached domain object
+        (the business operation may have failed before ``attach()``). Transactions of other kinds
+        (grants, transfers) do not make a record match.
         """
         ...
 

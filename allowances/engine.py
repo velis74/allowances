@@ -1,16 +1,15 @@
 """
-The fulfillment engine — ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``, ``transfer``,
-``open_wallet``, ``adjust_wallet``, ``close_wallet``, ``consumed``, ``plan_switch``,
-``cancel_scheduled_switch``, ``effective_allowances``, and the membership functions ``add_member``, ``remove_member``,
+The fulfilment engine: ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``, ``transfer``,
+``open_wallet``, ``adjust_wallet``, ``close_wallet``, ``consumed``, ``effective_balance``, ``plan_switch``,
+``cancel_scheduled_switch``, ``effective_allowances``, ``archive_expired_wallets``,
+``find_unattached_fulfillment_records``, and the membership functions ``add_member``, ``remove_member`` and
 ``groups_of``.
 
-Nothing in this module knows what a database is. It receives a :class:`~allowances.store.Store`
-and a :class:`~allowances.definitions.DefinitionProvider` and does arithmetic between them, which
-is why the same code runs against Postgres, an in-memory dict, or anything else somebody
-implements the port for.
+The module contains no storage code. It operates on a :class:`~allowances.store.Store` and a
+:class:`~allowances.definitions.DefinitionProvider` and runs against any ``Store`` implementation
+(Django ORM, in-memory).
 
-Every function takes ``store`` first. The Django adapter wraps these in module-level shortcuts
-that supply a default store, so application code rarely passes one explicitly.
+Every function takes ``store`` first.
 """
 
 from __future__ import annotations
@@ -85,12 +84,11 @@ def _lock(store: Store, wallet_ids: Iterable[object]) -> dict:
 
 def effective_balance(store: Store, wallet: Wallet, at: datetime | None = None) -> Decimal:
     """
-    The balance that governs a decision right now.
+    The balance available at ``at`` (default now).
 
-    Without a ``reset_config`` the stored balance is authoritative. With one, the stored balance is
-    the per-window allotment and the transactions inside the current window are added to it — they
-    are negative for consumption, so the balance nets down as the window fills and climbs back as
-    old entries age out.
+    Without a ``reset_config`` it is the stored balance. With one, the stored balance is the
+    per-window allotment, and the sum of the transactions in the current window (consumption is
+    negative) is added to it. Transactions before the window start do not count.
     """
     at = at or utcnow()
     wallet = _view(wallet, at)
@@ -175,8 +173,7 @@ def _ordered_wallets(store: Store, feature_def: FeatureDefinition, expanded: dic
     for step in feature_def.fulfillment_order:
         step_type, step_subject, step_source = (*step, None)[:3]
         wallet_types = [step_type] if step_type is not None else [WalletType.GRANT, WalletType.CONSUMABLE]
-        # A step naming a subject the caller didn't supply is skipped, not an error — features are
-        # declared once and called from contexts that legitimately know about different subjects.
+        # A step whose subject key is not in ``subjects`` is skipped.
         if step_subject is None:
             step_subjects = subject_refs
         else:
@@ -283,9 +280,7 @@ def _consume(
         if cost <= 0:
             continue
         if cost > capacity:
-            # Rounding pushed the cost past what is actually there. Clamp rather than overdraw:
-            # never spend more than the wallet holds, even at the price of covering slightly less
-            # than the rounding implied.
+            # Rounding can exceed capacity: cap the cost at capacity; the draw then covers less quantity.
             cost = capacity
 
         qty_covered = min(cost / effective_rate, remaining)
@@ -298,7 +293,7 @@ def _consume(
 
 
 def _modifier_factor(store: Store, feature: str, subjects: list[SubjectRef], at: datetime) -> Decimal:
-    """Where several modifiers apply, the subject gets the most favourable one."""
+    """The factor of the modifiers that apply; where several apply, the largest factor is used."""
     if not subjects:
         return Decimal("1")
     factors = store.find_modifier_factors(feature=feature, subjects=subjects, at=at)
@@ -343,12 +338,11 @@ def _plan(
 
 def _archive_if_drained(store: Store, wallet: Wallet) -> bool:
     """
-    Archive a wallet the moment it is spent out, so the live tables only ever hold wallets that can
-    still pay for something.
+    Archive a wallet whose stored balance is zero or less after a draw. Returns whether it was
+    archived.
 
-    A windowed wallet is never archived by this rule — it replenishes every window by design. A
-    wallet with an overdraft limit isn't either, since a zero balance still leaves it able to fund
-    the next request. Nor is a wallet with an ``allotment``: the next plan switch adjusts it.
+    Not archived: a windowed wallet (its balance is restored each window), a wallet with an
+    ``overdraft_limit``, and a wallet with an ``allotment`` (a plan switch adjusts it).
     """
     if wallet.reset_config or wallet.allotment is not None:
         return False
@@ -362,9 +356,9 @@ def archive_expired_wallets(store: Store, at: datetime | None = None) -> int:
     """
     Archive wallets whose ``valid_until`` has passed. Returns how many were archived.
 
-    Expired wallets are already invisible to fulfillment, so nothing will ever draw from them again
-    and the drain-triggered archival above will never see them. A host application is expected to
-    call this periodically — a Celery beat task, a cron job, a management command.
+    Fulfilment does not draw from or archive expired wallets. Call this periodically (Celery beat,
+    cron, a management command). A scheduled plan-switch adjustment due at ``at`` is written before
+    the wallet is checked and archived.
     """
     at = at or utcnow()
     archived = 0
@@ -397,10 +391,11 @@ def peek(
     at: datetime | None = None,
 ) -> FulfillmentResult:
     """
-    Ask whether a request *could* be met, without touching anything.
+    Report how much of the request the subjects' wallets could cover at ``at``, without writing or
+    locking anything.
 
-    No transactions, no fulfillment record, no balance changes. The answer is a snapshot and
-    carries no reservation — a concurrent caller can spend what this said was available.
+    No transactions, no fulfilment record, no balance changes. The result reserves nothing: a
+    concurrent caller can spend the balance it reported as available.
     ``subjects`` are expanded with their groups, as in :func:`fulfill`.
     """
     feature_def = provider.get_feature(feature)
@@ -432,14 +427,14 @@ def fulfill(
     actor: SubjectRef | None = None,
 ) -> FulfillmentResult:
     """
-    Actually consume the licence, writing one transaction per wallet drawn from.
+    Consume ``quantity`` of ``feature`` from the subjects' wallets, writing one ``CONSUMPTION`` entry
+    per draw (a wallet can be drawn on both the ordinary and the overdraft pass).
 
     With ``allow_partial=False`` (the default) a request that cannot be met in full raises
-    :class:`~allowances.errors.InsufficientBalanceError` and the whole call is rolled back — the
-    caller gets all of it or none of it. With ``allow_partial=True`` whatever was available is
+    :class:`~allowances.errors.InsufficientBalanceError` and nothing is written. With ``allow_partial=True`` whatever was available is
     consumed and ``result.satisfied`` reports whether that was enough.
 
-    Passing a ``guid`` groups this call with earlier ones under a single fulfillment record, so one
+    Passing a ``guid`` groups this call with earlier ones under a single fulfilment record, so one
     business operation spanning several features can be reversed as a unit.
 
     Every subject in ``subjects`` is expanded with its transitive groups under the same key (see
@@ -477,8 +472,8 @@ def fulfill(
             )
 
         created: list[Transaction] = []
-        # A wallet can be drawn from twice — once on the ordinary pass, once on the overdraft pass.
-        # Track its running state here so the second draw starts from the first draw's result.
+        # A wallet can be drawn twice, on the ordinary and on the overdraft pass; the second draw
+        # starts from the wallet state after the first.
         current: dict = {}
         for draw in drawn:
             wallet = current.get(draw.wallet.id, draw.wallet)
@@ -504,8 +499,8 @@ def fulfill(
                 wallet = replace(wallet, balance=balance, first_overdraft_at=first_overdraft)
                 store.save_wallet(wallet)
             elif wallet.first_overdraft_at is None and effective_balance(store, wallet, at) < 0:
-                # A windowed wallet's stored balance never moves, but it can still go negative
-                # within a window, and that first moment is worth recording.
+                # Windowed wallet: the stored balance is unchanged; record when the effective balance
+                # first goes negative.
                 wallet = replace(wallet, first_overdraft_at=at)
                 store.save_wallet(wallet)
 
@@ -532,11 +527,12 @@ def _record(store: Store, guid: uuid.UUID | None):
 
 def attach(store: Store, guid: uuid.UUID, obj: ObjectRef) -> None:
     """
-    Record which domain object a fulfillment paid for.
+    Attach ``obj``, the domain object the fulfilment paid for, to every entry of the record ``guid``
+    that has no object yet.
 
-    Fulfillment happens before the business operation completes — you consume the quota, then send
-    the email. This closes the loop afterwards, and it is what makes a record with unattached
-    consumption entries a usable signal that something died in between.
+    A record whose consumption entries stay unattached is returned by
+    :func:`find_unattached_fulfillment_records`. Raises :class:`~allowances.errors.RecordNotFoundError`
+    for an unknown ``guid``.
     """
     with store.unit_of_work():
         if store.get_record(guid) is None:
@@ -553,11 +549,11 @@ def _refuse_archived_source(wallet_id: object) -> None:
 
 def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None, *, actor: SubjectRef | None = None) -> None:
     """
-    Give back everything recorded under one fulfillment record: consumption, credits and transfers.
+    Reverse everything recorded under one fulfilment record: consumption, credits and transfers.
 
     Nothing is deleted or edited: each original gets a matching storno entry carrying ``actor`` (who
-    reversed it), so the ledger still shows what happened and what undid it. Calling this twice is a
-    no-op the second time — a transaction that already has its storno is left alone.
+    reversed it); the original stays in the ledger next to its storno. A transaction that already
+    has its storno is skipped, so a second call writes nothing.
 
     Reversing a transfer takes the amount back from its target. The check nets every storno of the
     record on that wallet, so a consumption of the transferred amount under the same guid is given
@@ -567,15 +563,15 @@ def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None, *, acto
     source of a transfer is archived, :class:`~allowances.errors.WalletNotFoundError` is raised and
     nothing is written.
 
-    Other transactions whose wallet has since been archived are skipped: that wallet is gone from
-    live storage and there is nothing left to credit.
+    Other transactions on an archived wallet are skipped.
 
     The record is locked first, then every wallet involved in one pass, in ascending id order.
+    Raises :class:`~allowances.errors.RecordNotFoundError` for an unknown ``guid``.
     """
     at = at or utcnow()
     with store.unit_of_work():
-        # Locking the record — not just the rows — is what serialises two concurrent reversals. Both
-        # would otherwise read the same "not yet stornoed" set and each write a refund.
+        # The record lock serialises concurrent reversals; without it both read the same unreversed set
+        # and each writes a storno.
         if store.get_record(guid, lock=True) is None:
             raise RecordNotFoundError(f"No fulfillment record with guid {guid}")
 
@@ -659,7 +655,7 @@ def credit(
     Add ``amount`` to a wallet's balance, as a ``GRANT`` ledger entry recorded with ``actor``.
 
     ``obj`` attaches the entry to the domain object that paid for it (a payment, an order). ``guid``
-    files the entry under a fulfillment record, so :func:`unfulfill` can reverse it.
+    files the entry under a fulfilment record, so :func:`unfulfill` can reverse it.
 
     Raises :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet,
     :class:`~allowances.errors.UnsuitableWalletError` for a windowed one or one not valid at ``at``, and
@@ -709,7 +705,7 @@ def transfer(
     """
     Move ``amount`` from one wallet to another of the same currency.
 
-    Writes two ``TRANSFER`` entries under one fulfillment record (``guid``, or a new one): a debit
+    Writes two ``TRANSFER`` entries under one fulfilment record (``guid``, or a new one): a debit
     on the source and a credit on the target, both recorded with ``actor`` and attached to ``obj``
     when given. The wallet types may differ. A windowed wallet's stored allotment is not changed;
     the entries count in its window like any other. :func:`unfulfill` reverses both legs.
@@ -822,9 +818,8 @@ def open_wallet(
     """
     Open one wallet for ``subject`` from ``spec``, valid from ``effective_date`` (default now).
 
-    ``source`` is stored on the wallet. A wallet with any source other than ``"plan"`` is never
-    closed or adjusted by :func:`plan_switch` — that is how a purchased credit pack outlives plan
-    changes.
+    ``source`` is stored on the wallet. A wallet whose ``source`` is not ``"plan"`` (e.g. a purchased
+    credit pack) is never closed or adjusted by :func:`plan_switch`.
     """
     with store.unit_of_work():
         return _open(store, subject, spec, source, effective_date or utcnow())
@@ -867,8 +862,8 @@ def _reallot(store: Store, wallet: Wallet, new_amount: Decimal, top_up: bool, at
 #   {"kind": "close", "at": ..., "valid_until": <the wallet's previous valid_until>}
 #   {"kind": "open", "at": ...}
 #   {"kind": "adjust", "at": ..., "allotment": ..., "top_up": ..., <spec fields>}
-# Closing and opening are expressed by validity dates already; "adjust" is applied lazily — viewed
-# by readers from its date on, and written by the first locked operation that reaches the wallet.
+# "close" and "open" take effect through the validity dates. "adjust" is applied on read from its date
+# on and written by the first locked operation on the wallet.
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -930,7 +925,7 @@ def _revert(store: Store, wallet: Wallet, now: datetime) -> None:
     if kind == "close":
         store.save_wallet(replace(wallet, valid_until=_from_iso(wallet.scheduled["valid_until"]), scheduled=None))
     elif kind == "open":
-        # Ended before it began: never valid, and swept by archive_expired_wallets.
+        # valid_until = now precedes valid_from: never valid; archive_expired_wallets archives it.
         store.save_wallet(replace(wallet, valid_until=now, scheduled=None))
     else:
         store.save_wallet(replace(wallet, scheduled=None))
@@ -971,7 +966,8 @@ def _adjust(store: Store, wallet: Wallet, spec: WalletSpec, at: datetime) -> Wal
 
 def adjust_wallet(store: Store, wallet_id: object, allotment, *, at: datetime | None = None) -> Wallet:
     """
-    Change the allotment of a wallet that has one — a spending limit raised or lowered mid-period.
+    Change the allotment of a wallet that has one, e.g. a spending limit raised or lowered within a
+    period.
 
     Same arithmetic as :attr:`~allowances.types.SwitchPolicy.ADJUST`: a windowed wallet gets the new
     per-window allotment, a stored balance moves by the difference, which may be negative.
@@ -992,7 +988,7 @@ def adjust_wallet(store: Store, wallet_id: object, allotment, *, at: datetime | 
 
 def close_wallet(store: Store, wallet_id: object, *, at: datetime | None = None) -> Wallet:
     """
-    End a wallet at ``at`` (default now) — revoking a right, closing a budget.
+    End a wallet at ``at`` (default now), e.g. to revoke a right or close a budget.
 
     A scheduled plan-switch adjustment already due at ``at`` is applied first. The wallet's
     ``valid_until`` becomes ``at`` unless it already ends earlier, and a scheduled switch record not
@@ -1017,7 +1013,7 @@ def consumed(store: Store, wallet_id: object, since: datetime, until: datetime) 
     """
     Net amount drawn from a wallet in ``[since, until]``: consumption minus the reversals of
     consumption booked in that interval. Credits, transfers, plan adjustments and their reversals do
-    not count. This is the figure a host application bills for a postpaid budget wallet.
+    not count.
     """
     total = Decimal("0")
     kinds: dict = {}
@@ -1129,7 +1125,7 @@ def cancel_scheduled_switch(store: Store, subjects: dict) -> int:
     """
     Cancel the plan switch scheduled for these subjects that has not yet taken effect: closed wallets
     get their previous ``valid_until`` back, scheduled adjustments are dropped, and wallets it would
-    have opened end before they begin. Returns how many subjects had a switch cancelled.
+    have opened get ``valid_until`` = now, so they are never valid. Returns how many subjects had a switch cancelled.
     """
     now = utcnow()
     cancelled = 0
@@ -1182,10 +1178,9 @@ def effective_allowances(
 
 def find_unattached_fulfillment_records(store: Store, older_than: datetime | None = None):
     """
-    Fulfillment records still holding a consumption entry with no domain object attached — quota
-    that was spent on something that may never have happened. A recovery job walks these and decides
-    whether to :func:`unfulfill` them. Credits and transfers are complete when written and never make
-    a record appear here.
+    Fulfilment records with at least one consumption entry that has no attached object, limited to
+    records created at or before ``older_than`` when given. Credit and transfer entries never make a record
+    appear here.
     """
     return store.records_with_unattached_transactions(older_than=older_than)
 

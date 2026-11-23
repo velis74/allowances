@@ -1,4 +1,4 @@
-"""Turning a fractional cost into a whole unit, per the consuming currency's ``round_fn``."""
+"""Rounding of a fractional cost to a whole unit, per the consuming currency's ``round_fn``."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ ROUND_MODES = {
 
 def apply_round(value: Decimal, round_fn: str | None) -> Decimal:
     """
-    Round ``value`` to a whole unit. ``round_fn=None`` means the currency is happy with fractions
-    and the value is returned untouched.
+    Round ``value`` to a whole unit (``floor``, ``ceil`` or ``round`` = half up). ``round_fn=None``
+    returns ``value`` unchanged; any other name raises ``ValueError``.
     """
     if round_fn is None:
         return value

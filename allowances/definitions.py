@@ -1,13 +1,12 @@
 """
 The definition layer: what rights *exist*, as opposed to what a subject currently *holds*.
 
-Definitions (features, currencies, conversion rates, fulfillment order) are configuration, not
-state — they are not rows in a database and they are not versioned per subject. The engine never
-reads them directly; it asks a :class:`DefinitionProvider`.
+Definitions (features, currencies, conversion rates, fulfilment order) are configuration, not
+state: they are not stored in the database and not versioned per subject. The engine reads them
+only through a :class:`DefinitionProvider`.
 
 :class:`DictProvider` reads them from a plain dict. The Django adapter subclasses it to read
-``settings.ALLOWANCES``. A remote licence server would be a third implementation, and the engine
-would not notice.
+``settings.ALLOWANCES``. Other definition sources subclass :class:`DefinitionProvider`.
 """
 
 from __future__ import annotations
@@ -25,8 +24,8 @@ def import_string(dotted_path: str):
     """
     Import ``"package.module.attribute"`` and return the attribute.
 
-    A dependency-free equivalent of ``django.utils.module_loading.import_string`` — the core must
-    not import Django to resolve a ``fulfillment_order`` callable.
+    Equivalent of ``django.utils.module_loading.import_string`` without the Django dependency, so
+    the core resolves a ``fulfillment_order`` path without importing Django.
     """
     module_path, _, attr = dotted_path.rpartition(".")
     if not module_path:
@@ -43,8 +42,8 @@ class CurrencyDefinition:
     A named unit of entitlement.
 
     ``general=True`` marks a fallback currency (e.g. ``credits``) that any feature accepting it may
-    draw from. ``round_fn`` decides how a fractional cost is turned into a whole unit —
-    ``"floor"``, ``"ceil"``, ``"round"``, or ``None`` to leave fractions alone.
+    draw from. ``round_fn`` sets how a fractional cost is rounded to a whole unit:
+    ``"floor"``, ``"ceil"``, ``"round"``, or ``None`` to keep fractions.
     """
 
     name: str
@@ -88,9 +87,8 @@ class FeatureDefinition:
 
     ``fulfillment_order`` is either a list of ``(wallet_type, subject_name, source)`` steps or a
     callable that receives the candidate wallets and returns them in draw order. A ``source`` of
-    ``None`` matches wallets of every source. Note the callable receives
-    a ``list[Wallet]`` — plain value objects, not a database query — so the same ordering function
-    works against any backend.
+    ``None`` matches wallets of every source. The callable receives a ``list[Wallet]`` and works with
+    every backend.
     """
 
     name: str
@@ -138,6 +136,10 @@ class DictProvider(DefinitionProvider):
                 },
             },
         }
+
+    ``fulfillment_order`` may also be a callable or a dotted path to one. A step is
+    ``(wallet_type, subject)`` or ``(wallet_type, subject, source)``; ``None`` in a position matches
+    any value, and a bare subject string means any wallet type and source of that subject.
     """
 
     def __init__(self, config: dict | None = None):

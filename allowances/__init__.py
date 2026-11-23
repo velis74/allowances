@@ -1,12 +1,13 @@
 """
-allowances — grants and consumable budgets, enforced before the fact and auditable after it.
+allowances — grants and consumable budgets: checked and drawn before an operation, recorded in an
+append-only ledger.
 
-The core is dependency-free and storage-agnostic: it does arithmetic against a
-:class:`~allowances.store.Store` you provide. ``import allowances`` never imports a web framework
-or a database driver.
+The core has no dependencies and reads and writes state only through a
+:class:`~allowances.store.Store` passed to each call. ``import allowances`` imports no web framework
+and no database driver.
 
-Most applications don't use this module directly — they install a backend
-(``pip install allowances[django]``) and call its shortcuts, which supply the store for you.
+Applications usually call a backend's shortcuts instead (``allowances_django.shortcuts``, installed
+with ``pip install allowances[django]``); the shortcuts supply the store.
 """
 
 from allowances.definitions import (

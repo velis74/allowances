@@ -1,13 +1,12 @@
 """
 An in-memory :class:`~allowances.store.Store`.
 
-Two jobs. It makes the test suite fast — the engine's behaviour is arithmetic, and proving it
-doesn't need a database. And it keeps the port honest: every time the engine reaches for something
-only an ORM could do, this backend stops compiling, which is the signal that the abstraction leaked.
+Used by the test suite, and a reference implementation of the Store protocol without an ORM or
+database.
 
-Not for production. State lives in a dict, so it dies with the process and is invisible to every
-other one. Locking is a process-local ``RLock``, which is exactly as much concurrency control as a
-single-process test needs and no more.
+Not for production: state is held in process memory, lost when the process exits and not shared
+between processes. Locking is one process-local ``RLock`` held by ``unit_of_work``; ``lock=``
+arguments are ignored.
 """
 
 from __future__ import annotations
@@ -52,8 +51,7 @@ class MemoryStore:
         self._transaction_ids = itertools.count(1)
         self._modifier_ids = itertools.count(1)
         self._lock = threading.RLock()
-        # Distinguishes rows created within the same microsecond, so ordering stays deterministic
-        # on clocks too coarse to separate them.
+        # Orders rows created within the same clock tick.
         self._sequence = itertools.count(1)
         self._created_seq: dict[tuple[str, int], int] = {}
 
@@ -62,9 +60,9 @@ class MemoryStore:
     @contextmanager
     def unit_of_work(self):
         """
-        Atomic and re-entrant. Every block snapshots every collection and restores it if anything
-        raises, so a nested block that raises discards only its own writes, like a nested
-        ``atomic()`` with its savepoint.
+        Atomic and re-entrant. Each block snapshots every collection and restores it if the block
+        raises; a nested block that raises discards only its own writes, as a nested ``atomic()``
+        savepoint does.
         """
         self._lock.acquire()
         snapshot = self._snapshot()
@@ -219,8 +217,7 @@ class MemoryStore:
         actor: SubjectRef | None = None,
     ) -> Transaction:
         if storno_of_id is not None and any(t.storno_of_id == storno_of_id for t in self._transactions.values()):
-            # The relational backends enforce this with a unique constraint; a lost race here would
-            # silently refund twice, so the in-memory one refuses just as loudly.
+            # A transaction may be stornoed at most once.
             raise ValueError(f"Transaction {storno_of_id!r} has already been stornoed")
         txn = Transaction(
             id=next(self._transaction_ids),
@@ -247,7 +244,7 @@ class MemoryStore:
             if txn is not None:
                 self._transactions[txn_id] = replace(txn, obj=obj)
 
-    # -- fulfillment records -------------------------------------------------------------------
+    # -- fulfilment records -------------------------------------------------------------------
 
     def get_or_create_record(self, guid: uuid.UUID | None = None) -> FulfillmentRecord:
         if guid is None:
@@ -302,7 +299,7 @@ class MemoryStore:
         valid_from: datetime | None = None,
         valid_until: datetime | None = None,
     ) -> Modifier:
-        """Not part of the port — modifiers are seeded by an application, not by the engine."""
+        """Add a modifier. Not part of the Store protocol."""
         modifier = Modifier(
             id=next(self._modifier_ids),
             subject=subject,

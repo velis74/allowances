@@ -1,13 +1,11 @@
 """
 The value types the core passes around.
 
-Every type here is a plain, frozen dataclass — no ORM, no framework. A storage backend is free
-to persist these however it likes (relational rows, Redis hashes, a dict); what it hands back to
-the engine is always one of these.
+Every type here is a plain dataclass with no ORM or framework dependency. A backend may persist
+them in any form (relational rows, Redis hashes, a dict); it returns these types to the engine.
 
-The one type that is *not* here is the archive representation: what an archived wallet looks like
-is entirely a backend's business (see :meth:`allowances.store.Store.archive_wallet`), so the core
-never names it.
+Archived wallets have no core type; their representation is backend-specific (see
+:meth:`allowances.store.Store.archive_wallet`).
 """
 
 from __future__ import annotations
@@ -77,8 +75,8 @@ class SubjectRef:
 
     The core never sees the subject object itself, only this pair. ``type`` is an opaque string
     the host application chooses and a backend maps back to a real object; the Django adapter uses
-    ``"app_label.modelname"``. ``id`` is always stored as a string so integer, UUID and slug
-    primary keys all work without the core caring which.
+    ``"app_label.modelname"``. ``id`` is stored as a string, so integer, UUID and slug
+    primary keys are handled alike.
     """
 
     type: str
@@ -103,8 +101,8 @@ class SubjectRef:
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
     """
-    A reference to the domain object a fulfillment ended up paying for — the email that was sent,
-    the row that was created. Attached after the fact by :func:`allowances.engine.attach`.
+    A reference to the domain object a fulfilment paid for (a sent email, a created row). Set by
+    :func:`allowances.engine.attach`.
     """
 
     type: str
@@ -124,18 +122,17 @@ class Wallet:
     A subject's holding of one currency.
 
     ``balance`` means different things depending on ``reset_config``. Without one it is the
-    authoritative stored balance, drawn down by every consumption. With one it is the *per-window
-    allotment* — a constant that fulfillment never mutates — and the balance that actually governs
-    decisions is computed on the fly by summing transactions inside the current window. See
-    :func:`allowances.engine.effective_balance`.
+    authoritative stored balance, drawn down by every consumption. With one it is the per-window
+    allotment, which fulfilment does not change; the effective balance is the allotment plus the
+    sum of transactions inside the current window. See :func:`allowances.engine.effective_balance`.
 
-    ``source`` names where the wallet came from. :func:`allowances.engine.plan_switch` only opens and
-    closes wallets with ``source == "plan"``; any other value (``"purchase"``, ``"budget"``) is left
-    alone by it. ``allotment`` is the plan's amount for a wallet opened with an ``ADJUST`` or
-    ``TOP_UP`` policy, the base the next plan switch computes its difference against. It is ``None``
-    for every other wallet. ``scheduled`` is set while a plan switch with a future effective date
+    ``source`` names the origin of the wallet. :func:`allowances.engine.plan_switch` only opens and
+    closes wallets with ``source == "plan"``; wallets with any other source (``"purchase"``,
+    ``"budget"``) are not changed by it. ``allotment`` is the plan's amount for a wallet opened with
+    an ``ADJUST`` or ``TOP_UP`` policy, the base the next plan switch computes its difference against.
+    It is ``None`` for every other wallet. ``scheduled`` is set while a plan switch with a future effective date
     affects the wallet; it records what that switch changes, so the change applies on its date and
-    can be cancelled before it. Its content belongs to the engine.
+    can be cancelled before it. Its content is engine-internal; a backend stores it unchanged.
     """
 
     id: object
