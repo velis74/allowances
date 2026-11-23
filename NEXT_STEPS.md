@@ -1,70 +1,51 @@
 # NEXT_STEPS.md — allowances
 
-**Concern 1** built the DB schema, **concern 2** the fulfillment engine, **concern 3** the docs site.
-**Concern 4** split the library into a dependency-free core (`allowances`) plus a Django storage
-backend (`allowances_django`).
-
-Read `DECISIONS.md` entries 20–28 before touching the split — several of them (the subject-column
-change, the `fulfillment_order` callable contract, the record-level lock in `unfulfill`) are
-deliberate design choices, not accidents.
-
-## Open, in rough priority order
-
-- **Publish to PyPI.** `allowances` is reserved by nobody yet — the name was verified free during
-  concern 4, and that stays true only until someone else takes it.
-- **Hosting for the docs site.** `npm run docs:build` produces a static site in
-  `docs/.vitepress/dist`. Nothing publishes it anywhere.
+The design of the split into a dependency-free core (`allowances`) and a Django storage backend
+(`allowances_django`) is recorded in `DECISIONS.md` entries 20–28.
 
 ## Candidates, none blocking
 
-- **A second real backend.** The in-memory store proves the port is implementable, but it is not
-  adversarial — it has no network, no partial failure, no serialisation. A Redis or SQLAlchemy backend
-  would find whatever the port still assumes. `docs/backends/redis.md` argues Redis should be a hybrid
-  rather than a replacement; that argument is worth testing against an actual implementation.
-- **Admin actions for the engine.** The seven models are registered for inspection, but nothing offers a
-  "peek" button or an "unfulfill this record" action. Worth adding if this gets a human-operated
-  support workflow.
-- **A remote `DefinitionProvider`.** The interface is stable and has two implementations
-  (`DictProvider`, `SettingsProvider`). A provider fetching definitions from a licence server — with
-  caching and a failure policy — is now a self-contained piece of work.
-- **Reconciliation helper for downgrades.** `peek` supports the flow described in
-  `docs/guide/reversals.md#downgrades`, but nothing walks a host application's domain objects for it.
-  Deliberately so — that part is application-specific — though a documented recipe would reduce
-  friction for the first consumer that needs it.
+- **A second real backend.** Only the in-memory and Django stores implement the port; neither covers
+  network errors, partial failure or serialisation. A Redis or SQLAlchemy backend would test those.
+  `docs/backends/redis.md` proposes Redis as a hybrid with a relational store; an implementation would
+  verify that design.
+- **Admin actions for the engine.** The seven models are registered for inspection; the admin has no
+  "peek" button and no "unfulfill this record" action. Needed for a support workflow operated by people.
+- **A remote `DefinitionProvider`.** Implementations: `DictProvider`, `SettingsProvider`,
+  `PermissionProvider`. Open: a provider that loads definitions from a licence server, with caching
+  and a failure policy.
+- **Reconciliation helper for downgrades.** `peek` supports the flow in
+  `docs/guide/reversals.md#downgrades`; walking the host application's domain objects is
+  application-specific. Open: a documented recipe for it.
 - **Exact rounding reconciliation.** `DECISIONS.md` #14: the engine clamps to capacity and back-derives
   `qty_covered` rather than solving for an exact relationship between requested quantity and charged
-  currency. Revisit if a consumer needs cent-exact behaviour rather than "never overdraws, close
-  enough".
-- **Performance under high wallet counts.** `_ordered_wallets` issues one store call per
-  `(wallet_type, subject)` step in a static `fulfillment_order`. Fine at the counts expected today;
-  worth profiling if a consumer has far more wallets per subject than the test fixtures do.
-- **Compaction for long-lived windowed wallets.** `sum_transactions` runs on every fulfillment against
-  a windowed wallet. At millions of entries per window that will hurt, and the archive tables are
-  already the right place to move aged-out entries to.
+  currency. Needed only when a consumer requires an exact charge per quantity; the current rule
+  guarantees only that no wallet is overdrawn.
+- **Performance under high wallet counts.** With a list of steps as `fulfillment_order`,
+  `_ordered_wallets` issues one `find_wallets` call per step, wallet type and expanded subject (the
+  subject and each of its groups); group expansion adds one `memberships_of` call per level. To be
+  profiled for subjects with many wallets or deep group trees.
+- **Compaction for long-lived windowed wallets.** `sum_transactions` runs on every fulfilment against
+  a windowed wallet. With millions of entries per window this sum becomes slow; aged-out entries could
+  be moved to the archive tables.
 
 ## Consumable decorator
 
-Blocked on four policy decisions that only a real view can settle:
+Blocked on four policy decisions that require a view that uses the decorator:
 
-- What counts as success. An exception is easy; a view returning `403` itself is not — the decorator
-  only sees an `HttpResponse`. Probably "2xx consumes", and that rule will be wrong once.
-- Rollback or storno. Inside `atomic`, an exception erases the transactions too — clean, but against
-  the "reversals are recorded, not applied" rule. Calling `unfulfill` instead requires the fulfill to
-  live outside the view's transaction.
+- What counts as success. An exception is detectable; a view returning `403` itself is not — the
+  decorator only sees an `HttpResponse`. Candidate rule: a 2xx response consumes.
+- Rollback or storno. Inside `atomic`, an exception rolls back the transactions too, which contradicts
+  the rule that reversals are recorded, not applied. Calling `unfulfill` instead requires the fulfill
+  to run outside the view's transaction.
 - Quantity: fixed, or a callable over the request.
-- `StreamingHttpResponse` returns before anything has happened.
+- `StreamingHttpResponse` returns before the response body is produced.
 
-Mechanics are already in place: `fulfill` deducts immediately (no reserve/commit phase, so concurrent
-requests cannot double-spend), several calls sharing a `guid` group into one `FulfillmentRecord`,
-`unfulfill(guid)` reverses the lot, and `find_unattached_fulfillment_records` finds the ones that
+Existing mechanics: `fulfill` deducts immediately (no reserve/commit phase, so concurrent requests
+cannot double-spend), several calls sharing a `guid` group into one `FulfillmentRecord`,
+`unfulfill(guid)` reverses all of them, and `find_unattached_fulfillment_records` finds the ones that
 consumed quota and delivered nothing.
 
-The decorator sits on the view, which knows about the request; the service function takes the `guid`
-as an argument. Templates never consume — they render "may I" (grant, cached) and "how much is left".
-
-Wait for a view that actually needs it, or the four policies will be guesswork.
-
-## Not this repo, ever
-
-Consumer-specific wiring — feature and currency definitions, wallet UI, cost mapping to real payment
-providers — belongs in the consuming application, never here.
+The decorator sits on the view, which has the request; the service function takes the `guid` as an
+argument. Templates never consume — they check whether a grant is held (cached) and read the
+remaining balance.
