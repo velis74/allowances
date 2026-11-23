@@ -21,7 +21,7 @@ deliberate design choices, not accidents.
   adversarial — it has no network, no partial failure, no serialisation. A Redis or SQLAlchemy backend
   would find whatever the port still assumes. `docs/backends/redis.md` argues Redis should be a hybrid
   rather than a replacement; that argument is worth testing against an actual implementation.
-- **Admin actions for the engine.** The six models are registered for inspection, but nothing offers a
+- **Admin actions for the engine.** The seven models are registered for inspection, but nothing offers a
   "peek" button or an "unfulfill this record" action. Worth adding if this gets a human-operated
   support workflow.
 - **A remote `DefinitionProvider`.** The interface is stable and has two implementations
@@ -42,41 +42,9 @@ deliberate design choices, not accidents.
   a windowed wallet. At millions of entries per window that will hurt, and the archive tables are
   already the right place to move aged-out entries to.
 
-## Django permissions backend (grant-only)
+## Consumable decorator
 
-Serve `user.has_perm()` from grant wallets instead of `auth_permission`. A grant with no expiry is a
-permanent right, one with `valid_until` a temporary one, and any `(type, id)` subject gives per-object
-rights — so the overlap with Django permissions is real, not theoretical.
-
-Scope is grants only. Consumables stay out of `has_perm`: it is called from templates and admin lists,
-where a side effect would burn quota on every render.
-
-What it takes:
-
-- `AllowancesBackend.has_perm` / `has_module_perms` — `peek` over `WalletType.GRANT`. ~80 lines.
-- A `subject_resolver` hook, `(user, obj) -> {"user": u, ...}`, defaulting to `{"user": user}`.
-  Django's `has_perm(user, perm, obj)` signature has nowhere to put a subject dict, so the adapter
-  has to build one. Core stays agnostic.
-- Mapping `"club.change_member"` → feature name: convention or a dict in settings.
-- Per-request cache. Django caches a user's whole permission set on first access; every check here
-  is a wallet lookup.
-- `get_all_permissions()` — the only non-trivial piece. Django wants the *set* of permissions, not an
-  answer about one, so this needs a reverse index from grant currencies back to the features that
-  accept them. Buildable at startup because definitions are static. Without it,
-  `{% if perms.club.change_member %}` does not work.
-- `is_superuser` bypass, if `ModelBackend` is dropped rather than chained.
-
-Free once the backend works: admin's `has_*_permission`, DRF permission classes,
-`@permission_required`, `PermissionRequiredMixin` — all of them call `has_perm`.
-
-Drops out of scope: the admin UI for assigning permissions (`user_permissions`, `Group`) edits Django
-tables directly. Granting rights would need its own UI over wallets.
-
-Estimate: a day or two.
-
-### Consumable decorator
-
-Separate and smaller, but blocked on four policy decisions that only a real view can settle:
+Blocked on four policy decisions that only a real view can settle:
 
 - What counts as success. An exception is easy; a view returning `403` itself is not — the decorator
   only sees an `HttpResponse`. Probably "2xx consumes", and that rule will be wrong once.
@@ -95,7 +63,6 @@ The decorator sits on the view, which knows about the request; the service funct
 as an argument. Templates never consume — they render "may I" (grant, cached) and "how much is left".
 
 Wait for a view that actually needs it, or the four policies will be guesswork.
-
 
 ## Not this repo, ever
 

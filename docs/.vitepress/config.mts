@@ -37,11 +37,12 @@ export default defineConfig({
             { text: 'Reversals and recovery', link: '/guide/reversals' },
             { text: 'Plans and archival', link: '/guide/plans-and-archival' },
             { text: 'Credits and budgets', link: '/guide/credits-and-budgets' },
+            { text: 'Rights and permissions', link: '/guide/permissions' },
           ],
         },
         {
           text: 'Upgrading',
-          items: [{ text: 'Upgrading to 0.3', link: '/guide/upgrading' }],
+          items: [{ text: 'Upgrading to 0.4', link: '/guide/upgrading' }],
         },
       ],
       '/backends/': [

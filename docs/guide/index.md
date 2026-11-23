@@ -1,5 +1,5 @@
 ---
-description: 'What allowances is: grants and consumable budgets with a ledger, resolved across users, teams and organisations. Not payments, flags or authorisation.'
+description: 'What allowances is: grants and consumable budgets with a ledger, resolved across users, teams and organisations, and rights served as Django permissions. Not payments or flags.'
 ---
 
 # What it is
@@ -16,22 +16,19 @@ It is **not a payment system**. There are no invoices, no card charges, no Strip
 
 It is **not a feature-flag service**. Flags are a deployment concern and change for everyone at once. Entitlements are per-subject state that gets spent.
 
-It is **not an authorisation framework**. Use it for rights that are bought, expire, or get spent; leave "this role may touch this table" where your framework already knows to look for it. That said, the two overlap more than that sentence suggests — see below.
+It is **not an authorisation framework**. It has no object-level permissions and no deny rules. It does hold rights — granted, expiring, inherited through groups, audited on use — and serves them to Django's permission checks; see [below](#as-a-permissions-layer).
 
-## What it could also be
+## As a permissions layer
 
-A permissions layer, if you push it. That is not what it is designed for, and a static role that never changes is cheaper to answer from a role table than from a wallet. But the pieces line up almost accidentally well:
+Rights that are held rather than spent are grant wallets too, and the library serves them as permissions:
 
-- A grant wallet with no expiry **is** a permission bit.
-- A wallet with a `valid_until` is a *temporary* right — something most permission systems cannot express at all.
-- A subject is any `(type, id)` pair, so `("club_membership", 17)` gives you per-object rights without a dedicated object-permissions library.
-- The [fulfillment order](/guide/fulfillment-order) is a resolution order: check the user's own right, then the team's, then the organisation's — declared as configuration rather than written as an `if` chain.
-- A consumable currency turns into a permission you may exercise *n* times, and revoking the organisation's grant revokes it for everyone who inherited it.
-- Every check that spends something leaves a ledger entry, which is the audit trail permission systems usually have to bolt on afterwards.
+- A grant wallet at a conversion rate of 0 with a positive balance is a **right**: `peek` checks it, `fulfill` records each use on the ledger at amount 0. Without `valid_until` it is permanent, with one it is *temporary*, and `close_wallet` revokes it.
+- A subject is any `(type, id)` pair, and a subject may be a **member** of other subjects, nested to any depth. A user holds every right of every group it belongs to; a membership that would form a cycle is rejected.
+- The [fulfillment order](/guide/fulfillment-order) is a resolution order: the user's own right, then the team's, then the organisation's — declared as configuration rather than written as an `if` chain.
+- A ledger entry names its **actor**, so a use paid from a group's wallet still shows which member made it.
+- `allowances_django.permissions.AllowancesBackend` answers Django's `has_perm` from grant wallets, so `@permission_required`, `PermissionRequiredMixin`, `ModelAdmin.has_*_permission`, `{% if perms.app.codename %}` and DRF permission classes read them unchanged. It works alone or after `ModelBackend`, and caches a user's permission set on the user object.
 
-"May this user edit club members?" is a perfectly legitimate `peek` call today. What you would be giving up is the plumbing, not the semantics: the framework's own permission check, its template helper, its admin hooks and its API permission classes all read the framework's own tables, and most of them cache a user's entire permission set on first access where every check here is a wallet lookup.
-
-That gap is the only thing in the way, and closing it is already scoped: `NEXT_STEPS.md` describes a grant-only Django permissions backend — `has_perm` served from grant wallets, with a per-request cache — after which `@permission_required`, `PermissionRequiredMixin`, `ModelAdmin.has_*_permission` and DRF permission classes all keep working unchanged, because every one of them goes through `has_perm`.
+Its limits: no object-level permissions, no deny rules, and no admin UI for granting — `grant_permission`, `revoke_permission` and `add_member` are the API. See [Rights and permissions](/guide/permissions).
 
 ## The problems it does solve
 

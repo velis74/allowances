@@ -50,13 +50,13 @@ INSTALLED_APPS = [
 ]
 
 # then: python manage.py migrate
-# Six tables appear, prefixed `allowances_`.
+# Seven tables appear, prefixed `allowances_`.
 ```
 
 :::
 
 `MemoryStore` is for tests and for trying things out — it dies with the process. For real storage,
-either install the Django backend or [write your own](/backends/writing-a-backend): it is seventeen
+either install the Django backend or [write your own](/backends/writing-a-backend): it is twenty-two
 methods.
 
 ## Declare what exists

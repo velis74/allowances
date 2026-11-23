@@ -37,6 +37,18 @@ Two things worth knowing:
 
 **A step naming a subject you didn't pass is skipped, not an error.** Features are declared once and called from contexts that legitimately know about different subjects — a background job may have the team but no user. Declaring `("consumable", "user")` and then calling without a `"user"` key simply moves on.
 
+## Memberships
+
+`fulfill` and `peek` expand every subject you pass with the groups it is a [member](/guide/concepts#membership) of, under the same key. Behind `"user"` stands an ordered list: the user, then the user's direct groups, then their groups, breadth-first, each group once. With no memberships the list is the subject alone and nothing changes.
+
+- A step naming a key walks that key's list in order. Within each subject of the list, wallets are ordered by expiry as above, so `("consumable", "user")` drains the user's own wallets before the team's, and the team's before the organisation's.
+- A step with subject `None` walks every expanded subject: each key's list, in the order you passed the keys.
+- A callable `fulfillment_order` receives the candidates of every expanded subject.
+- [Modifiers](#modifiers-apply-on-top) are looked up for every expanded subject; the most favourable applies.
+- A wallet is drawn at most once, even when a group is reachable from two keys.
+
+Given `add_member(user, team)`, `fulfill("send_email", 1, {"user": user})` with the order `[("consumable", "user")]` draws from the user's wallets first and the team's after them — the team pool without naming it in the call or in the order. Naming it as its own key, `{"user": user, "team": team}`, still works and puts the team where the order says.
+
 ## Currencies within a step
 
 A step matches a wallet only if the feature's section for that wallet type accepts the wallet's currency. Given:
@@ -69,7 +81,7 @@ The contract:
 - It may filter as well as order. Dropping a wallet means it is never drawn from.
 - It is called once per `fulfill()`, and both the ordinary and the [overdraft](/guide/overdraft) pass walk the same result.
 
-The list it gets contains every wallet that could plausibly match: belonging to any subject you passed, of any wallet type the feature has a section for, in any currency those sections accept, valid right now. Ordering is your only job — validity and currency filtering already happened.
+The list it gets contains every wallet that could plausibly match: belonging to any subject you passed or any of its groups, of any wallet type the feature has a section for, in any currency those sections accept, valid right now. Ordering is your only job — validity and currency filtering already happened.
 
 You may also pass the function object directly rather than a dotted path, which is handy in tests:
 

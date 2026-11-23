@@ -1,11 +1,13 @@
 # Credits and budgets
 
-A plan is one way to fund a wallet. Two others are common enough to have recipes: credits a customer buys up front, and a budget a customer may spend beyond the plan and is billed for afterwards. Both use the same pieces:
+A plan is one way to fund a wallet. Others are common enough to have recipes: credits a customer buys up front, a budget a customer may spend beyond the plan and is billed for afterwards, and money handed from one wallet to another. All three use the same pieces:
 
 | | |
 | --- | --- |
 | `open_wallet(subject, spec, source=...)` | Opens one wallet outside a plan switch. Any `source` other than `"plan"` keeps it out of every `plan_switch`. |
 | `credit(wallet, amount, obj=..., guid=...)` | Adds to a wallet's balance as a `grant` ledger entry, attached to whatever paid for it. |
+| `transfer(from_wallet, to_wallet, amount)` | Moves an amount between two wallets of the same currency, as a pair of `transfer` ledger entries. |
+| `close_wallet(wallet)` | Ends a wallet now, without a ledger entry. |
 | `adjust_wallet(wallet, allotment)` | Changes the allotment of a wallet opened with an `adjust` or `top_up` policy — a limit raised or lowered. |
 | `consumed(wallet, since, until)` | Net amount drawn from a wallet in a period, reversals deducted. |
 | `(wallet_type, subject, source)` steps | Orders wallets of one subject and currency by where they came from. |
@@ -131,3 +133,57 @@ invoice_line(user, quantity=used, unit_price=PRICE_PER_REQUEST)
 `consumed` counts consumption and deducts its reversals, so a request refunded with `unfulfill` within the period is not billed. A reversal booked in a later period reduces that period's figure instead.
 
 **Plan changes.** The budget has source `"budget"`, so `plan_switch` leaves it — and its limit — alone. Only the included amount changes with the plan; under `adjust` it keeps this month's usage, so a switch mid-month does not hand out a fresh 300.
+
+## Moving money between wallets
+
+A tour guide holds a budget for the trip and gives each tourist 10 EUR of it to spend on their own. The tourist's money is a wallet of its own, funded from the guide's:
+
+```python
+from decimal import Decimal
+
+from django.db import transaction
+
+from allowances import WalletSpec, WalletType
+from allowances_django.shortcuts import open_wallet, transfer
+
+
+def hand_out(guide_budget, tourist, guide):
+    with transaction.atomic():
+        pocket = open_wallet(
+            tourist,
+            WalletSpec(WalletType.CONSUMABLE, "eur", Decimal("0")),
+            source="allowance",
+        )
+        transfer(guide_budget, pocket, Decimal("10"), actor=guide)
+    return pocket
+```
+
+Opening and funding run in one transaction: when the guide's budget holds less than 10 EUR, `transfer` raises `InsufficientBalanceError` and the empty wallet is rolled back with it. With the core engine the same block is `with store.unit_of_work():`, which nests the same way.
+
+`transfer` never draws on overdraft: the source must hold the amount. Both wallets must be in the same currency; their types may differ. The ledger shows a `transfer` entry of −10 on the budget and +10 on the tourist's wallet, both with the guide as actor, so where every tourist's money came from is a query.
+
+**Returning what is left.** At the end of the trip the unspent money goes back with another transfer, in the opposite direction:
+
+```python
+from django.db import transaction
+
+from allowances.engine import effective_balance
+from allowances_django.shortcuts import close_wallet, transfer
+from allowances_django.store import DjangoStore
+
+
+def settle(pocket, guide_budget, guide):
+    store = DjangoStore()
+    current = store.get_wallet(pocket.id)
+    if current is None:          # spent out and archived
+        return
+    with transaction.atomic():
+        left = effective_balance(store, current)
+        if left > 0:
+            transfer(current, guide_budget, left, actor=guide)
+        close_wallet(current)
+```
+
+A tourist spending in the meantime leaves the pocket holding less than `left`; `transfer` then raises `InsufficientBalanceError` and nothing is written, so the call can be repeated.
+
+`unfulfill(result.guid)` also reverses a transfer, but only while the target still holds the whole amount (counting what the same record gives back to it) and the source is live — see [Reversing a transfer](/guide/reversals#reversing-a-transfer). A transfer is complete when it is written: it needs no `attach`, and the recovery sweep never reports it.

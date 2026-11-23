@@ -1,6 +1,6 @@
 # Concepts
 
-Six ideas. Three of them are definition (configuration), three are state (rows).
+Seven ideas. Three of them are definition (configuration), four are state (rows).
 
 ## Definition vs. state
 
@@ -23,6 +23,8 @@ fulfill("send_email", 1, {"user": request.user, "team": team})
 ```
 
 Those keys — `"user"`, `"team"` — are names *you* choose, and they are what `fulfillment_order` refers to. The same physical object can play different roles in different features.
+
+A subject may be a [member](#membership) of other subjects, and then also draws on their wallets.
 
 ::: tip Why not a GenericForeignKey?
 Because the core would then depend on Django. Storing `("auth.user", "42")` as two strings also means subjects with UUID or slug primary keys work, and a schema-per-tenant deployment stops fighting the shared `django_content_type` table. See [the Django backend notes](/backends/django#why-there-is-no-contenttype).
@@ -82,7 +84,16 @@ Without a `reset_config` it is the actual stored balance, drawn down by every co
 
 ## Transaction
 
-One signed ledger entry against a wallet: negative for consumption, positive for a credit or for the storno of a consumption. A `grant` entry is a credit (`credit()`) or a balance change made by a plan adjustment; the latter may be negative. It records which feature caused it, which fulfillment record it belongs to, and — once attached — which domain object it paid for.
+One signed ledger entry against a wallet, of one of four kinds:
+
+| Kind | Written by | Amount |
+| --- | --- | --- |
+| `consumption` | `fulfill` | Negative; zero for the use of a [right](/guide/permissions). |
+| `grant` | `credit()`, or a plan adjustment | Positive for a credit; either sign for an adjustment. |
+| `transfer` | `transfer()` | Negative on the source wallet, positive on the target, one pair per transfer. |
+| `storno` | `unfulfill` | The negated amount of the entry it reverses. |
+
+An entry records which feature caused it, which fulfillment record it belongs to, once attached which domain object it paid for, and its **actor**: the subject on whose behalf it was made. `fulfill` records the subject it was called for when there is exactly one, or the `actor` passed to it; a group wallet paying for a member's use therefore shows the member as the actor. A storno carries the actor passed to `unfulfill` — who reversed it.
 
 Nothing is ever edited in place and nothing is deleted while it still matters. A reversal is a new `storno` entry pointing at the original, and a transaction can be stornoed at most once, enforced by the database rather than by hope.
 
@@ -98,7 +109,23 @@ fulfill("attach_file", 3, subjects, guid=guid)
 unfulfill(guid)  # both, as a unit
 ```
 
-This is what makes "undo the whole operation" a single call rather than bookkeeping you have to do yourself.
+This is what makes "undo the whole operation" a single call rather than bookkeeping you have to do yourself. A `transfer` writes both of its legs under one record, so `unfulfill` reverses it as a unit too.
+
+## Membership
+
+A subject may be a member of other subjects. A group is an ordinary subject — a team, an organisation, a role — with no special type; a subject may belong to any number of groups, and groups may be members of groups.
+
+```python
+from allowances_django.shortcuts import add_member, groups_of
+
+add_member(user, team)
+add_member(team, organisation)
+groups_of(user)   # [team, organisation]
+```
+
+`peek` and `fulfill` expand every subject you pass with its groups, under the same key: `{"user": user}` also draws on the team's and the organisation's wallets, in the order described in [Fulfillment order](/guide/fulfillment-order#memberships). A membership that would make a subject a member of itself, directly or through other groups, raises `MembershipCycleError`.
+
+Memberships are state — rows in the store, changed with `add_member` and `remove_member`.
 
 ## Modifier
 

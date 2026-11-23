@@ -18,7 +18,7 @@ It is **not a payment system** — no invoices, no card charges, no money anywhe
 
 ## Install
 
-Django is optional. The core is `import allowances` and depends on nothing at all — not Django, not a database driver, not anything outside the standard library. Everything that matters (the ordering walk, conversion, rounding, overdraft, sliding windows) lives there, and talks to storage through a seventeen-method port.
+Django is optional. The core is `import allowances` and depends on nothing at all — not Django, not a database driver, not anything outside the standard library. Everything that matters (the ordering walk, conversion, rounding, overdraft, sliding windows) lives there, and talks to storage through a twenty-two-method port.
 
 ```bash
 pip install allowances            # the engine, zero dependencies
@@ -70,10 +70,10 @@ attach(result.guid, message)   # record what the quota bought
 
 Two layers, kept apart. **Definition** — what rights exist at all: features, currencies, conversion rates, priority order. Configuration, not rows. **State** — what a subject holds and has spent: wallets and a transaction ledger.
 
-The engine sits between them and knows nothing about either's storage. It receives definitions through a provider and state through a seventeen-method store port, which is why the same code runs against Postgres, SQLite or a dict.
+The engine sits between them and knows nothing about either's storage. It receives definitions through a provider and state through a twenty-two-method store port, which is why the same code runs against Postgres, SQLite or a dict.
 
 ```
-   allowances.engine        peek · fulfill · attach · unfulfill · credit · plan_switch
+   allowances.engine        peek · fulfill · unfulfill · transfer · add_member · plan_switch
            │
    ┌───────┴────────┐
    ▼                ▼
@@ -90,13 +90,31 @@ Highlights:
 - **Multi-source payment.** One operation can draw from a dedicated budget, then general credits, then a promotional grant, at conversion rates you set.
 - **Nothing edited in place.** Consumption writes a ledger entry; reversal writes a matching storno; spent-out wallets move to an archive.
 - **Sliding windows without a reset job.** "200 a day" works by ageing consumption out of a window, not by a nightly job that can fail.
-- **Multi-subject.** A licence can belong to a user, an organisation, a device, a location — resolved across all of them in one call.
+- **Multi-subject.** A licence can belong to a user, an organisation, a device, a location — resolved across all of them in one call, together with the groups each one is a member of.
 
-## What it could also be
+## As a permissions layer
 
-A permissions layer, if you push it. Not the point of the library, but the pieces line up: a grant with no expiry *is* a permission bit, the fulfillment order *is* a resolution order across user, team and organisation, and the ledger is the audit trail permission systems usually bolt on afterwards. You get things they rarely offer natively — rights that expire on a date, that may be exercised *n* times, or that are inherited from an organisation and revoked with it.
+Rights that are held rather than spent are grant wallets too. A grant at a conversion rate of 0 with a positive balance is a right: `peek` checks it, `fulfill` records each use on the ledger at amount 0, `valid_until` makes it temporary and `close_wallet` revokes it. Subjects can be members of groups, nested to any depth and checked for cycles, and hold their groups' rights; every entry can name the actor it was made for.
 
-Only the plumbing is missing, and `NEXT_STEPS.md` already scopes it: a grant-only permissions backend, after which the decorators, mixins and checks you have already written keep working unchanged. See [the guide](https://docs.velis.si/allowances/guide/).
+The Django adapter includes a grant-only authentication backend, `allowances_django.permissions.AllowancesBackend`, that answers `has_perm` from those wallets, alone or chained after `ModelBackend`:
+
+```python
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "allowances_django.permissions.AllowancesBackend",
+]
+```
+
+```python
+from allowances_django.permissions import grant_permission
+from allowances_django.shortcuts import add_member
+
+add_member(user, board)
+grant_permission(board, "club.change_member")
+user.has_perm("club.change_member")   # True
+```
+
+It has no object-level permissions, no deny rules and no admin UI for granting. See [Rights and permissions](https://docs.velis.si/allowances/guide/permissions).
 
 ## Development
 
