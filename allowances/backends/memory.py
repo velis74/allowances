@@ -175,7 +175,7 @@ class MemoryStore:
         return sorted(found, key=lambda w: self._sort_key("wallet", w))
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
-        expired = [w for w in self._wallets.values() if w.valid_until is not None and w.valid_until < at]
+        expired = [w for w in self._wallets.values() if w.valid_until is not None and w.valid_until <= at]
         return sorted(expired, key=lambda w: self._sort_key("wallet", w))
 
     def archive_wallet(self, wallet: Wallet) -> None:
@@ -319,5 +319,5 @@ class MemoryStore:
             if m.feature == feature
             and m.subject in subject_set
             and (m.valid_from is None or m.valid_from <= at)
-            and (m.valid_until is None or m.valid_until >= at)
+            and (m.valid_until is None or m.valid_until > at)
         ]

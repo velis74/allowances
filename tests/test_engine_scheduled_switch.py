@@ -124,7 +124,7 @@ def test_a_switch_that_has_taken_effect_cannot_be_cancelled(store, alice, clock)
     when = clock["now"] + timedelta(days=7)
     plan_switch(store, {"user": alice}, [_spec("50")], effective_date=when)
 
-    clock["now"] = when + timedelta(seconds=1)
+    clock["now"] = when
 
     assert cancel_scheduled_switch(store, {"user": alice}) == 0
     assert store.get_wallet(old.id).valid_until == when
@@ -141,7 +141,8 @@ def test_a_new_switch_replaces_the_scheduled_one(store, alice):
     assert store.get_wallet(old.id).valid_until == second
     assert not store.get_wallet(abandoned.id).is_valid_at(first)
     assert new.valid_from == second
-    assert len([w for w in wallets_for_subject(store, alice) if w.is_valid_at(second + timedelta(seconds=1))]) == 1
+    for at in (second - timedelta(microseconds=1), second):
+        assert len([w for w in wallets_for_subject(store, alice) if w.is_valid_at(at)]) == 1
 
 
 def test_an_immediate_switch_replaces_the_scheduled_one(store, alice):
@@ -172,3 +173,18 @@ def test_credit_refuses_a_wallet_that_is_not_yet_valid(store, alice):
 
     with pytest.raises(UnsuitableWalletError):
         credit(store, new.id, "5")
+
+
+def test_a_scheduled_switch_hands_over_at_its_effective_date(store, alice):
+    old = open_wallet(store, alice, balance="5")
+    when = utcnow() + timedelta(days=7)
+    [new] = plan_switch(store, {"user": alice}, [_spec("50")], effective_date=when)
+
+    def valid(at):
+        return [
+            w.id
+            for w in store.find_wallets(subjects=[alice], wallet_types=[WalletType.CONSUMABLE], currencies=None, at=at)
+        ]
+
+    assert valid(when - timedelta(microseconds=1)) == [old.id]
+    assert valid(when) == [new.id]

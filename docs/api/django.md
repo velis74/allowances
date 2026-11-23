@@ -202,7 +202,7 @@ A partial unique constraint on `storno_of` enforces that a transaction is revers
 
 ### `LicenseModifier`
 
-`subject_type`, `subject_id`, `feature`, `factor`, `valid_from`, `valid_until`.
+`subject_type`, `subject_id`, `feature`, `factor`, `valid_from` (inclusive), `valid_until` (exclusive).
 
 The engine only reads modifiers; the application creates them:
 

@@ -971,3 +971,21 @@ end in an error that a retry resolves, never in an unlocked membership change. A
 would avoid the error but adds a connection outside the caller's transaction and its test isolation.
 
 **Cost to revisit:** Low. One table and one store method; the port contract is unchanged.
+
+## 44. Wallet validity is the half-open interval `[valid_from, valid_until)`
+
+**Dilemma:** With both bounds inclusive, a wallet at `at == valid_until` is valid, and `close_wallet` or
+`plan_switch` closing a wallet at `at` while opening its successor at `valid_from = at` leaves both valid at that
+instant. Making expiry strict instead leaves the same overlap; moving the closing bound by a fixed step (1 µs) leaves
+an instant at which neither is valid.
+
+**Decision:** A wallet is valid at `at` when `valid_from` is null or `<= at`, and `valid_until` is null or `> at`.
+`find_expired_wallets` returns wallets with `valid_until <= at`, and `archive_expired_wallets` archives them. Modifiers
+use the same interval.
+
+**Reason:** A half-open interval tiles time: a wallet closed at an instant and one opened at it cover every instant
+exactly once, and from its `valid_from` on a wallet is either valid or expired.
+
+**Cost to revisit:** Low in code (the comparisons in `Wallet.is_valid_at`, both stores, `archive_expired_wallets` and
+`revoke_permission`); a
+change of meaning for any caller relying on the bound.

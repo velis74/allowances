@@ -132,7 +132,7 @@ def revoke_permission(subject, perm: str, *, at: datetime | None = None, store: 
                 wallet_type=str(WalletType.GRANT),
                 currency=permission_feature(perm),
             )
-            .exclude(valid_until__lt=at)
+            .exclude(valid_until__lte=at)
             .values_list("pk", flat=True)
         )
         for wallet_id in wallet_ids:

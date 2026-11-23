@@ -186,7 +186,8 @@ budget](/guide/credits-and-budgets#postpaid-budget).
 archive_expired_wallets(store, at=None) -> int
 ```
 
-Move wallets whose `valid_until` is before `at` into the archive; a wallet is still valid at its `valid_until`.
+Move wallets whose `valid_until` is at or before `at` into the archive; a wallet is valid until, not including, its
+`valid_until`.
 Returns how many. Run it from a periodic job: fulfilment
 ignores expired wallets and no other operation archives them.
 

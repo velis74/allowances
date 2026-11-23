@@ -354,7 +354,7 @@ def _archive_if_drained(store: Store, wallet: Wallet) -> bool:
 
 def archive_expired_wallets(store: Store, at: datetime | None = None) -> int:
     """
-    Archive wallets whose ``valid_until`` is before ``at``; a wallet is still valid at its
+    Archive wallets whose ``valid_until`` is at or before ``at``; a wallet is not valid at its
     ``valid_until``. Returns how many were archived.
 
     Fulfilment does not draw from or archive expired wallets. Call this periodically (Celery beat,
@@ -371,7 +371,7 @@ def archive_expired_wallets(store: Store, at: datetime | None = None) -> int:
             if wallet is None:
                 continue
             wallet = _settle(store, wallet, at)
-            if wallet.valid_until is None or wallet.valid_until >= at:
+            if wallet.valid_until is None or wallet.valid_until > at:
                 continue
             store.archive_wallet(wallet)
             archived += 1

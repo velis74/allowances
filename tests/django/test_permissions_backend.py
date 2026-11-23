@@ -141,6 +141,13 @@ def test_revoke_permission_closes_every_live_grant_and_counts_them(alice, backen
     assert backend.get_all_permissions(fresh(alice)) == {OTHER}
 
 
+def test_revoke_permission_leaves_a_grant_that_ends_at_that_instant(alice):
+    end = timezone.now() + timedelta(days=1)
+    grant_permission(alice, PERM, valid_until=end)
+
+    assert revoke_permission(alice, PERM, at=end) == 0
+
+
 def test_revoke_permission_without_a_grant_closes_nothing(alice):
     assert revoke_permission(alice, PERM) == 0
 

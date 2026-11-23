@@ -16,10 +16,12 @@ existing rows) and creates the `Membership` table. `0004_allowanceslock` creates
 Where several [modifiers](/guide/concepts#modifier) apply to one request, the smallest factor is used. A request that
 had both a discount (factor below 1) and a larger factor now costs the discounted amount.
 
-### Expiry: a wallet is valid at its `valid_until`
+### Validity: `valid_until` is exclusive
 
-`find_expired_wallets` and `archive_expired_wallets` treat a wallet as expired only after its `valid_until`. A custom
-backend's `find_expired_wallets` returns wallets whose `valid_until` is before `at`.
+A wallet is valid from `valid_from` (inclusive) until `valid_until` (exclusive): at its `valid_until` it no longer
+funds requests and is expired. A wallet closed at an instant and one opened at the same instant are never valid
+together. Modifiers use the same interval. A custom backend's `find_wallets` and `find_modifier_factors` return rows
+with `valid_until` after `at`, and its `find_expired_wallets` wallets with `valid_until` at or before `at`.
 
 ### Custom backends
 

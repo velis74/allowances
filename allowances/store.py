@@ -75,7 +75,7 @@ class Store(Protocol):
         Wallets belonging to any of ``subjects``, of any of ``wallet_types``, in any of
         ``currencies`` (``None``: every currency), valid at ``at`` — ordered by ``(created_at, id)``.
 
-        "Valid at" means ``valid_from`` is null or ``<= at``, and ``valid_until`` is null or ``>= at``.
+        "Valid at" means ``valid_from`` is null or ``<= at``, and ``valid_until`` is null or ``> at``.
         """
         ...
 
@@ -125,7 +125,7 @@ class Store(Protocol):
         ...
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
-        """Wallets whose ``valid_until`` is set and ``< at``, ordered by ``(created_at, id)``."""
+        """Wallets whose ``valid_until`` is set and ``<= at``, ordered by ``(created_at, id)``."""
         ...
 
     def archive_wallet(self, wallet: Wallet) -> None:
@@ -232,5 +232,8 @@ class Store(Protocol):
     # -- modifiers -----------------------------------------------------------------------------
 
     def find_modifier_factors(self, *, feature: str, subjects: Sequence[SubjectRef], at: datetime) -> list[Decimal]:
-        """Factors of every modifier for ``feature`` that applies to any of ``subjects`` at ``at``."""
+        """
+        Factors of every modifier for ``feature`` that applies to any of ``subjects`` at ``at``: ``valid_from``
+        null or ``<= at``, ``valid_until`` null or ``> at``.
+        """
         ...
