@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'allowances',
   description:
-    'May this happen, and can they afford it? Python grants and consumable budgets paid from several wallets, with an append-only ledger and storno. Django.',
+    'Python grants and consumable budgets paid from several wallets, with an append-only ledger and storno, and a Django adapter.',
   lastUpdated: true,
 
   transformHead({ pageData, siteConfig }) {
@@ -31,7 +31,7 @@ export default defineConfig({
         {
           text: 'Using it',
           items: [
-            { text: 'Fulfillment order', link: '/guide/fulfillment-order' },
+            { text: 'Fulfilment order', link: '/guide/fulfillment-order' },
             { text: 'Sliding windows', link: '/guide/sliding-windows' },
             { text: 'Overdraft', link: '/guide/overdraft' },
             { text: 'Reversals and recovery', link: '/guide/reversals' },
@@ -54,7 +54,7 @@ export default defineConfig({
             { text: 'Django', link: '/backends/django' },
             { text: 'In-memory', link: '/backends/memory' },
             { text: 'Writing a backend', link: '/backends/writing-a-backend' },
-            { text: 'Would Redis work?', link: '/backends/redis' },
+            { text: 'Redis as a backend', link: '/backends/redis' },
           ],
         },
       ],

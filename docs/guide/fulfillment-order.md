@@ -1,6 +1,8 @@
-# Fulfillment order
+# Fulfilment order
 
-When a request can be paid for from several places, something has to decide which to drain first. That decision is a business rule — spend the customer's own budget before the team pool, spend expiring grants before fresh ones, spend the promotional balance first so it doesn't go to waste — so it belongs in configuration rather than in a branch somewhere.
+When several wallets can pay for a request, the feature's `fulfillment_order` sets the order in which they are drawn
+from. It is configuration per feature, for example the user's own budget before the team pool, grants that expire
+before fresh ones, or a promotional balance first.
 
 ## The list form
 
@@ -16,11 +18,15 @@ When a request can be paid for from several places, something has to decide whic
 Each step is `(wallet_type, subject_name)` or `(wallet_type, subject_name, source)`:
 
 - `wallet_type` is `"grant"`, `"consumable"`, or `None` for either.
-- `subject_name` is one of the keys you pass to `fulfill()`, or `None` for every subject you passed, in the order you passed them.
-- `source` limits the step to wallets with that [`source`](/guide/concepts#wallet) — `"plan"`, `"purchase"`, `"budget"`. Omitted or `None`, the step matches every source.
+- `subject_name` is one of the keys you pass to `fulfill()`, or `None` for every subject you passed, in the order you
+  passed them.
+- `source` limits the step to wallets with that [`source`](/guide/concepts#wallet) — `"plan"`, `"purchase"`,
+  `"budget"`. Omitted or `None`, the step matches every source.
 - A bare string is shorthand: `"location"` means `(None, "location", None)`.
 
-Steps are walked in order. Within one step, the wallet that **expires soonest** is drawn first, wallets without `valid_until` last, and wallets with the same expiry oldest first. Monthly plan credits are therefore spent before purchased credits that never expire, and a soon-to-expire grant before a fresh one.
+Steps are walked in order. Within one subject of a step, the wallet that **expires soonest** is drawn first, wallets
+without `valid_until` last, and wallets with the same expiry oldest first. Monthly plan credits are therefore spent
+before purchased credits that never expire, and a grant that expires soon before a fresh one.
 
 Splitting one subject's wallets by source puts the plan's included amount ahead of a paid budget in the same currency:
 
@@ -31,23 +37,29 @@ Splitting one subject's wallets by source puts the plan's included amount ahead 
 ],
 ```
 
-Two things worth knowing:
+**A wallet is visited only once.** If two steps match it, the earlier step draws from it and the later one skips it.
 
-**A wallet is only visited once.** If two steps would both match it, the earlier step wins and the later one skips it.
-
-**A step naming a subject you didn't pass is skipped, not an error.** Features are declared once and called from contexts that legitimately know about different subjects — a background job may have the team but no user. Declaring `("consumable", "user")` and then calling without a `"user"` key simply moves on.
+**A step naming a subject you did not pass is skipped, not an error.** With the step `("consumable", "user")` and no
+`"user"` key in the call (for example a background job that has the team but no user), the walk continues with the
+next step.
 
 ## Memberships
 
-`fulfill` and `peek` expand every subject you pass with the groups it is a [member](/guide/concepts#membership) of, under the same key. Behind `"user"` stands an ordered list: the user, then the user's direct groups, then their groups, breadth-first, each group once. With no memberships the list is the subject alone and nothing changes.
+`fulfill` and `peek` expand every subject you pass with the groups it is a [member](/guide/concepts#membership) of,
+under the same key. The key `"user"` then holds an ordered list: the user, its direct groups, then their groups,
+breadth-first, each group once. Without memberships the list holds only the subject.
 
-- A step naming a key walks that key's list in order. Within each subject of the list, wallets are ordered by expiry as above, so `("consumable", "user")` drains the user's own wallets before the team's, and the team's before the organisation's.
+- A step naming a key walks that key's list in order. Within each subject of the list, wallets are ordered by expiry
+  as above, so `("consumable", "user")` draws from the user's own wallets before the team's, and from the team's before
+  the organisation's.
 - A step with subject `None` walks every expanded subject: each key's list, in the order you passed the keys.
 - A callable `fulfillment_order` receives the candidates of every expanded subject.
-- [Modifiers](#modifiers-apply-on-top) are looked up for every expanded subject; the most favourable applies.
+- [Modifiers](#modifiers) are looked up for every expanded subject; the largest factor applies.
 - A wallet is drawn at most once, even when a group is reachable from two keys.
 
-Given `add_member(user, team)`, `fulfill("send_email", 1, {"user": user})` with the order `[("consumable", "user")]` draws from the user's wallets first and the team's after them — the team pool without naming it in the call or in the order. Naming it as its own key, `{"user": user, "team": team}`, still works and puts the team where the order says.
+Given `add_member(user, team)`, `fulfill("send_email", 1, {"user": user})` with the order `[("consumable", "user")]`
+draws from the user's wallets first and from the team's after them. Passing the team as its own key,
+`{"user": user, "team": team}`, places it where the order names that key.
 
 ## Currencies within a step
 
@@ -57,11 +69,13 @@ A step matches a wallet only if the feature's section for that wallet type accep
 "consumable": {"currencies": ["email_send", ("credits", 0.5)]},
 ```
 
-a step will draw from `email_send` wallets at one unit each and `credits` wallets at half a credit each — whichever it reaches first in the order. A wallet in a currency the section doesn't list is invisible to that step.
+a step draws from `email_send` wallets at one unit each and from `credits` wallets at half a credit each, in the order
+it reaches them. A step does not draw from a wallet whose currency the section does not list.
 
 ## The callable form
 
-When the rule can't be expressed as a list — "drain the fattest wallet first", "prefer whichever expires soonest", "prefer the currency the customer has most of" — pass a callable instead:
+For an order a list cannot express, for example largest balance first or the currency with the largest total balance
+first, pass a callable:
 
 ```python
 "fulfillment_order": "myapp.allowances.order_wallets",
@@ -70,29 +84,33 @@ When the rule can't be expressed as a list — "drain the fattest wallet first",
 ```python
 # myapp/allowances.py
 def order_wallets(wallets):
-    """Drain the fattest wallet first."""
+    """Largest balance first."""
     return sorted(wallets, key=lambda w: (-w.balance, w.id))
 ```
 
 The contract:
 
-- It receives a **`list[Wallet]`** — plain value objects, not a database query. This is what makes a custom ordering portable across backends.
-- It returns anything iterable of those wallets, in draw order.
-- It may filter as well as order. Dropping a wallet means it is never drawn from.
-- It is called once per `fulfill()`, and both the ordinary and the [overdraft](/guide/overdraft) pass walk the same result.
+- It receives a **`list[Wallet]`** — plain value objects, not a database query. The same function therefore works
+  with every backend.
+- It returns an iterable of those wallets, in draw order.
+- It may filter as well as order. A wallet it drops is not drawn from.
+- It is called once per `fulfill()`, and both the ordinary and the [overdraft](/guide/overdraft) pass walk the same
+  result.
 
-The list it gets contains every wallet that could plausibly match: belonging to any subject you passed or any of its groups, of any wallet type the feature has a section for, in any currency those sections accept, valid right now. Ordering is your only job — validity and currency filtering already happened.
+The list contains every wallet that can match: belonging to any subject you passed or any of its groups, of any
+wallet type the feature has a section for, in any currency those sections accept, valid at the time of the call. The
+list is already filtered by validity and currency.
 
-You may also pass the function object directly rather than a dotted path, which is handy in tests:
+The value can also be the function object instead of a dotted path:
 
 ```python
 "fulfillment_order": order_wallets,
 ```
 
+## Modifiers
 
-## Modifiers apply on top
-
-A [modifier](/guide/concepts#modifier) multiplies the cost after the rate but before rounding, and it applies uniformly across every wallet in the walk. It changes what things cost, never the order they're drawn in.
+A [modifier](/guide/concepts#modifier) multiplies the cost after the rate but before rounding, and it applies equally
+to every wallet in the walk. A modifier does not change the draw order.
 
 ## Worked example
 
@@ -111,7 +129,8 @@ A [modifier](/guide/concepts#modifier) multiplies the cost after the rate but be
 },
 ```
 
-The user holds a grant wallet with 2 `email_send` and a consumable wallet with 10 `credits`; the team holds a consumable wallet with 100 `email_send`.
+The user holds a grant wallet with 2 `email_send` and a consumable wallet with 10 `credits`; the team holds a
+consumable wallet with 100 `email_send`.
 
 `fulfill("send_email", 30, {"user": user, "team": team})` draws:
 
@@ -121,4 +140,4 @@ The user holds a grant wallet with 2 `email_send` and a consumable wallet with 1
 | `("consumable", "user")` | user's 10 `credits` | 10 credits | 20 emails |
 | `("consumable", "team")` | team's 100 `email_send` | 8 | 8 emails |
 
-Thirty emails, three ledger entries, one fulfillment record. The user's own allocation is exhausted before the team pool is touched, which is what the order said to do.
+The call writes three consumption entries under one fulfilment record.

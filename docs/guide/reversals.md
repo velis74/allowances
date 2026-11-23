@@ -1,8 +1,10 @@
 # Reversals and recovery
 
-Quota is consumed *before* the work happens — you take the email allowance, then send the email. Which means the interesting failure is the one in between: the allowance is gone and the email never went out.
+`fulfill` runs before the business operation: the quota is consumed, then the email is sent. When the operation fails,
+the consumed quota has to be returned.
 
-Three pieces handle this: `attach` records success, `unfulfill` undoes a failure, and a query finds the ones that did neither.
+Three functions handle this: `attach` records success, `unfulfill` reverses a failure, and
+`find_unattached_fulfillment_records` finds fulfilments that have neither.
 
 ## Attach: recording what it paid for
 
@@ -12,49 +14,68 @@ message = send_the_email()
 attach(result.guid, message)
 ```
 
-`attach` points every not-yet-attached transaction under that guid at the object. It leaves already-attached ones alone, so calling it again with a different object is a no-op rather than a rewrite.
+`attach` points every not-yet-attached transaction under that guid at the object. It leaves already-attached ones
+unchanged, so calling it again with a different object changes nothing.
 
-Doing this consistently is what makes the rest work. An attached transaction is quota that bought something real. An unattached one is quota in limbo.
+The recovery sweep treats a consumption entry without an attached object as a possibly failed operation.
 
-## Unfulfill: giving it back
+## Unfulfill
 
 ```python
 unfulfill(result.guid)
 ```
 
-Nothing is deleted and nothing is edited. Each original entry gets a matching `storno` entry of the opposite sign, pointing back at what it reverses. The ledger keeps showing that 3 credits were taken and 3 credits were given back — which is what you want when a customer asks, and what a deletion would have destroyed.
+Nothing is deleted and nothing is edited. Each original entry gets a matching `storno` entry of the opposite sign,
+pointing back at the entry it reverses. The ledger shows both that 3 credits were taken and that 3 credits were given
+back.
 
-Some properties worth relying on:
+Properties:
 
-**It is idempotent.** A transaction that already has its storno is skipped. Calling it twice reverses nothing twice.
+**It is idempotent.** A transaction that already has its storno is skipped. A second call writes nothing.
 
-**The database enforces it too.** A unique constraint on `storno_of` means a lost race produces an integrity error rather than a silent double refund.
+**The database enforces it.** `storno_of` has a unique constraint: a second storno of the same entry, for example from
+two concurrent calls, fails with an integrity error.
 
-**It is a unit.** Every transaction under the guid is reversed together, across however many `fulfill` calls shared it and however many wallets they touched.
+**All entries under the guid are reversed together**, across every `fulfill` call that shared the guid and every
+wallet they drew from.
 
-**An unknown guid raises.** `RecordNotFoundError`, not a silent no-op — a guid nobody ever fulfilled under means the caller has lost track of which operation it was undoing.
+**An unknown guid raises** `RecordNotFoundError`.
 
-**Credits reverse the same way.** A [`credit`](/guide/credits-and-budgets) filed under a guid gets a negative storno, which takes the amount back out of the wallet — possibly below zero, if it has been spent since.
+**Credits reverse the same way.** A [`credit`](/guide/credits-and-budgets) filed under a guid gets a negative storno,
+which takes the amount back out of the wallet, below zero if part of it has been spent.
 
-**Archived wallets are skipped.** If a wallet was drained to zero and [archived](/guide/plans-and-archival), it is gone from live storage and there is nothing left to credit. The call still succeeds.
+**Archived wallets are skipped**, except the wallets of a [transfer](#reversing-a-transfer). If a wallet was drained to
+zero and [archived](/guide/plans-and-archival), it is no longer in live storage; the call succeeds and writes no storno
+for it.
 
-**The storno records who reversed it.** `unfulfill(guid, actor=support_agent)` puts that actor on every storno entry; the original entries keep theirs.
+**The storno records who reversed it.** `unfulfill(guid, actor=support_agent)` puts that actor on every storno entry;
+the original entries keep theirs.
 
 ## Reversing a transfer
 
-A [`transfer`](/guide/credits-and-budgets#moving-money-between-wallets) writes its debit and credit under one record, and `unfulfill(result.guid)` reverses both: the amount goes back to the source and comes out of the target.
+A [`transfer`](/guide/credits-and-budgets#moving-money-between-wallets) writes its debit and credit under one record,
+and `unfulfill(result.guid)` reverses both: the amount goes back to the source and comes out of the target.
 
-The target has to still hold it. The check nets every storno of the record on the target, so consumption paid from the transferred amount under the same guid is given back first. When the target's balance (`max(effective_balance, 0)`) plus that net change is below zero — some of the amount has been spent under another guid — or the target has been archived, `unfulfill` raises `InsufficientBalanceError` and writes nothing, for that transfer and for everything else under the same guid. Return the unspent part with a new `transfer` in the opposite direction instead.
+The target has to still hold the amount. The check nets every storno of the record on the target, so consumption paid
+from the transferred amount under the same guid is given back first. When the target's balance
+(`max(effective_balance, 0)`) plus that net change is below zero (part of the amount has been spent under another
+guid), or the target has been archived, `unfulfill` raises `InsufficientBalanceError` and writes nothing, for that
+transfer and for everything else under the same guid. To return the unspent part, make a new `transfer` in the
+opposite direction.
 
-The source has to still exist. When it has been archived since — drained to zero by later consumption — there is no live wallet to give the amount back to: `unfulfill` raises `WalletNotFoundError` and writes nothing.
+The source has to still exist. When it has been archived since (drained to zero by later consumption), `unfulfill`
+raises `WalletNotFoundError` and writes nothing.
 
 ::: warning Reversing across a window boundary
-For a [sliding-window](/guide/sliding-windows) wallet, reverse inside the same window and the storno nets the consumption straight back out. Reverse after the window has passed and the original has already aged out — so the storno credits a window that never paid for anything. Keep recovery flows short relative to the window, or accept the drift knowingly.
+For a [sliding-window](/guide/sliding-windows) wallet, a reversal inside the same window cancels the consumption. After
+the window has passed, the original consumption no longer counts, so the storno is a positive entry in the current
+window and raises its balance above the allotment. Reverse within the window to avoid it.
 :::
 
-## Finding what broke
+## Recovery sweep
 
-A consumption entry with no attached object is a fulfillment whose business operation may have died halfway. Credits and transfers are complete when written and never appear here:
+A consumption entry with no attached object is a fulfilment whose business operation may have failed. Credits and
+transfers are complete when written and are not listed:
 
 ```python
 from datetime import timedelta
@@ -63,23 +84,27 @@ from django.utils import timezone
 
 from allowances_django.shortcuts import find_unattached_fulfillment_records, unfulfill
 
-# Anything unattached for more than an hour is almost certainly not coming back.
+# Records unattached for over an hour count as failed.
 cutoff = timezone.now() - timedelta(hours=1)
 
 for record in find_unattached_fulfillment_records(older_than=cutoff):
     unfulfill(record.guid)
 ```
 
-The age cutoff is the whole design. Without it you would sweep up operations that are merely still in flight; with it, "old and unattached" is a good proxy for "the process died".
+`older_than` excludes operations still in progress; set it above the longest duration of the operation.
 
-Run it from a periodic job. How aggressive to be is a policy call — refunding too eagerly hands back quota for work that did happen, refunding too slowly leaves customers short.
+Run it from a periodic job. A cutoff shorter than an operation reverses the consumption of operations that succeed; a
+longer one delays returning the quota of failed ones.
 
-::: tip This is why `attach` is not optional
-Skip it and every fulfillment looks like a failure to this query. If some operations genuinely have nothing to attach, attach something anyway — the record they belong to, a log row, anything stable — or exclude those features from the sweep.
+::: tip `attach` and the recovery sweep
+Without `attach`, every fulfilment is returned by this query. For operations with no natural object, attach a stable
+object instead (the record they belong to, a log row), or exclude those features from the sweep.
 :::
 
 ## Downgrades
 
-When a subject's entitlement shrinks — a plan downgrade from 10 seats to 3 — the library will not go and find what now exceeds the limit. It can't: only your application knows which seven users to remove.
+When a subject's entitlement shrinks (a plan downgrade from 10 seats to 3), the library does not select the objects
+over the new limit; the application chooses them.
 
-The supported flow is to use `peek` to ask what still fits, decide which domain objects to drop, and `unfulfill` the fulfillment records belonging to them. That is why `attach` matters here too: it is the link from an over-limit object back to the quota it holds.
+Use `peek` to check what still fits, decide which domain objects to drop, and `unfulfill` the fulfilment records
+belonging to them. `attach` links each object to the fulfilment record of its quota.
