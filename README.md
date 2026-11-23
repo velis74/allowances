@@ -88,7 +88,7 @@ ledger.
 The engine reads definitions through a `DefinitionProvider` and state through a 22-method store port; it runs unchanged
 on Postgres, SQLite or `MemoryStore`.
 
-```
+```text
    allowances.engine        peek · fulfill · unfulfill · transfer · add_member · plan_switch
            │
    ┌───────┴────────┐

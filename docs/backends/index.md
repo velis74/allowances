@@ -4,7 +4,7 @@ The engine selects candidate wallets, walks them in fulfilment order, converts a
 pass and computes window balances without accessing a database. It reads and writes state through a **store** with
 twenty-two methods; the rest of the engine is plain Python.
 
-```
+```text
       your application
              │
              ▼
