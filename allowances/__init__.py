@@ -26,6 +26,7 @@ from allowances.engine import (
     close_wallet,
     consumed,
     credit,
+    effective_allowances,
     effective_balance,
     find_unattached_fulfillment_records,
     fulfill,
@@ -49,6 +50,7 @@ from allowances.errors import (
 )
 from allowances.store import Store
 from allowances.types import (
+    Allowance,
     FulfillmentRecord,
     FulfillmentResult,
     Modifier,
@@ -67,6 +69,7 @@ from allowances.windows import window_start
 __version__ = "0.4.0"
 
 __all__ = [
+    "Allowance",
     "AllowancesError",
     "CurrencyDefinition",
     "CurrencySpec",
@@ -102,6 +105,7 @@ __all__ = [
     "close_wallet",
     "consumed",
     "credit",
+    "effective_allowances",
     "effective_balance",
     "find_unattached_fulfillment_records",
     "fulfill",

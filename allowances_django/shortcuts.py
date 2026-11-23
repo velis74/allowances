@@ -22,7 +22,7 @@ from typing import Sequence
 
 from allowances import engine
 from allowances.definitions import DefinitionProvider
-from allowances.types import FulfillmentResult, Transaction, Wallet, WalletSpec
+from allowances.types import Allowance, FulfillmentResult, Transaction, Wallet, WalletSpec, WalletType
 from allowances_django.permissions import PermissionProvider
 from allowances_django.providers import SettingsProvider
 from allowances_django.store import DjangoStore
@@ -215,6 +215,23 @@ def archive_expired_wallets(at: datetime | None = None, *, store: DjangoStore | 
 def find_unattached_fulfillment_records(older_than: datetime | None = None, *, store: DjangoStore | None = None):
     """Records with a consumption entry that never got a domain object attached — candidates for recovery."""
     return engine.find_unattached_fulfillment_records(get_store(store), older_than)
+
+
+def effective_allowances(
+    subject,
+    *,
+    at: datetime | None = None,
+    wallet_types: Sequence[WalletType] | None = None,
+    currencies: Sequence[str] | None = None,
+    store: DjangoStore | None = None,
+) -> list[Allowance]:
+    """
+    Every wallet valid at ``at`` of ``subject`` (a model instance or subject reference) and of its
+    groups, with holder, depth and effective balance; see :func:`allowances.engine.effective_allowances`.
+    """
+    return engine.effective_allowances(
+        get_store(store), subject_ref(subject), at=at, wallet_types=wallet_types, currencies=currencies
+    )
 
 
 def add_member(member, group, *, store: DjangoStore | None = None) -> None:

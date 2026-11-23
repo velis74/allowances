@@ -5,6 +5,8 @@ A Django permission ``"app_label.codename"`` is the feature and the currency
 ``"perm:app_label.codename"``. A subject holds the permission while it has a live grant wallet in
 that currency with a positive balance; :func:`grant_permission` opens one and
 :func:`revoke_permission` closes it. Members of a group hold the group's permissions.
+:func:`effective_permissions` picks the permissions out of a subject's
+:func:`~allowances.engine.effective_allowances`.
 
 :class:`AllowancesBackend` answers Django's permission checks from those wallets. It has no
 object-level permissions and no deny rules.
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Iterable
 
 from asgiref.sync import sync_to_async
 from django.utils import timezone
@@ -27,7 +30,7 @@ from allowances.definitions import (
     FeatureSection,
 )
 from allowances.errors import DefinitionNotFoundError
-from allowances.types import Wallet, WalletSpec, WalletType
+from allowances.types import Allowance, Wallet, WalletSpec, WalletType
 from allowances_django.models import Wallet as WalletRow
 from allowances_django.providers import SettingsProvider
 from allowances_django.store import DjangoStore
@@ -136,6 +139,24 @@ def revoke_permission(subject, perm: str, *, at: datetime | None = None, store: 
     return len(wallet_ids)
 
 
+def effective_permissions(allowances: Iterable[Allowance]) -> dict[str, list[Allowance]]:
+    """
+    The Django permissions among ``allowances``: each ``"app_label.codename"`` held by a grant
+    allowance in currency ``perm:app_label.codename`` with a positive balance, mapped to those
+    allowances in input order. Keys are sorted.
+    """
+    held: dict[str, list[Allowance]] = {}
+    for allowance in allowances:
+        wallet = allowance.wallet
+        if (
+            wallet.wallet_type == WalletType.GRANT
+            and wallet.currency.startswith(PERMISSION_PREFIX)
+            and allowance.balance > 0
+        ):
+            held.setdefault(wallet.currency[len(PERMISSION_PREFIX) :], []).append(allowance)
+    return dict(sorted(held.items()))
+
+
 class AllowancesBackend:
     """
     Authentication backend answering permission checks from permission grant wallets of the user
@@ -195,13 +216,7 @@ class AllowancesBackend:
         }
 
     def _granted(self, user_obj) -> set[str]:
-        store = self.get_store()
-        at = timezone.now()
-        user = subject_ref(user_obj)
-        subjects = [user, *engine.groups_of(store, user)]
-        wallets = store.find_wallets(subjects=subjects, wallet_types=[WalletType.GRANT], currencies=None, at=at)
-        return {
-            wallet.currency[len(PERMISSION_PREFIX) :]
-            for wallet in wallets
-            if wallet.currency.startswith(PERMISSION_PREFIX) and engine.effective_balance(store, wallet, at) > 0
-        }
+        allowances = engine.effective_allowances(
+            self.get_store(), subject_ref(user_obj), at=timezone.now(), wallet_types=[WalletType.GRANT]
+        )
+        return set(effective_permissions(allowances))

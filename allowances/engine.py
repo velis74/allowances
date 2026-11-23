@@ -1,7 +1,7 @@
 """
 The fulfillment engine — ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``, ``transfer``,
 ``open_wallet``, ``adjust_wallet``, ``close_wallet``, ``consumed``, ``plan_switch``,
-``cancel_scheduled_switch``, and the membership functions ``add_member``, ``remove_member``,
+``cancel_scheduled_switch``, ``effective_allowances``, and the membership functions ``add_member``, ``remove_member``,
 ``groups_of``.
 
 Nothing in this module knows what a database is. It receives a :class:`~allowances.store.Store`
@@ -33,6 +33,7 @@ from allowances.errors import (
 from allowances.rounding import apply_round
 from allowances.store import Store
 from allowances.types import (
+    Allowance,
     FulfillmentResult,
     ObjectRef,
     PLAN_SOURCE,
@@ -1144,6 +1145,41 @@ def cancel_scheduled_switch(store: Store, subjects: dict) -> int:
     return cancelled
 
 
+def effective_allowances(
+    store: Store,
+    subject: SubjectRef,
+    *,
+    at: datetime | None = None,
+    wallet_types: Sequence[WalletType] | None = None,
+    currencies: Sequence[str] | None = None,
+) -> list[Allowance]:
+    """
+    Every wallet valid at ``at`` (default now) of ``subject`` and of the groups it belongs to,
+    directly or transitively, with its holder, depth and effective balance.
+
+    ``wallet_types`` defaults to both types, ``currencies`` ``None`` to every currency. Wallets are
+    listed whatever their balance, zero and negative included. Ordered by depth, then by holder in
+    :func:`groups_of` order, then by the store's wallet order. Nothing is locked or written.
+    """
+    at = at or utcnow()
+    levels = _levels(store, subject)
+    holders = [holder for level in levels for holder in level]
+    depths = {holder: depth for depth, level in enumerate(levels) for holder in level}
+    position = {holder: index for index, holder in enumerate(holders)}
+    found = store.find_wallets(
+        subjects=holders,
+        wallet_types=list(wallet_types) if wallet_types is not None else [WalletType.GRANT, WalletType.CONSUMABLE],
+        currencies=None if currencies is None else list(currencies),
+        at=at,
+    )
+    wallets = [w for w in (_view(w, at) for w in found) if w.is_valid_at(at)]
+    wallets.sort(key=lambda w: (depths[w.subject], position[w.subject]))
+    return [
+        Allowance(wallet=w, holder=w.subject, depth=depths[w.subject], balance=effective_balance(store, w, at))
+        for w in wallets
+    ]
+
+
 def find_unattached_fulfillment_records(store: Store, older_than: datetime | None = None):
     """
     Fulfillment records still holding a consumption entry with no domain object attached — quota
@@ -1165,7 +1201,26 @@ def groups_of(store: Store, subject: SubjectRef) -> list[SubjectRef]:
     then their groups, breadth-first, each group once. Terminates on cyclic data; ``subject`` itself
     is never included.
     """
-    return _expand(store, {"": subject})[""][1:]
+    return [group for level in _levels(store, subject)[1:] for group in level]
+
+
+def _levels(store: Store, subject: SubjectRef) -> list[list[SubjectRef]]:
+    """``subject``, then its direct groups, then theirs, one list per level, each group once."""
+    seen = {subject}
+    levels = [[subject]]
+    while True:
+        groups_by_member: dict[SubjectRef, list[SubjectRef]] = {}
+        for member, group in store.memberships_of(members=levels[-1]):
+            groups_by_member.setdefault(member, []).append(group)
+        following = []
+        for member in levels[-1]:
+            for group in groups_by_member.get(member, []):
+                if group not in seen:
+                    seen.add(group)
+                    following.append(group)
+        if not following:
+            return levels
+        levels.append(following)
 
 
 def add_member(store: Store, member: SubjectRef, group: SubjectRef) -> None:

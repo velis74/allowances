@@ -162,6 +162,24 @@ class Wallet:
 
 
 @dataclass(frozen=True, slots=True)
+class Allowance:
+    """
+    One live wallet a subject holds, directly or through a group, as returned by
+    :func:`allowances.engine.effective_allowances`.
+
+    ``wallet`` is the wallet as it is at the queried moment (a scheduled adjustment that has come
+    due applied, unsaved). ``holder`` owns the wallet: the queried subject or one of its groups.
+    ``depth`` is 0 for the subject itself, 1 for its direct groups, 2 for their groups, and so on.
+    ``balance`` is the wallet's :func:`~allowances.engine.effective_balance` at that moment.
+    """
+
+    wallet: Wallet
+    holder: SubjectRef
+    depth: int
+    balance: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class Transaction:
     """
     One ledger entry against a wallet. ``amount`` is signed: negative for consumption and for the
