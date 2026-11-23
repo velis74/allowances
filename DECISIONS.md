@@ -962,3 +962,23 @@ admin lists call it on every render.
 
 **Cost to revisit:** Medium. The prefix is stored in wallet currencies; changing it needs a data
 migration.
+
+## 41. `effective_allowances` is the general read; Django permissions are a filter over it
+
+**Dilemma:** Showing where a user's Django permissions come from needs the holder and depth of every
+grant. A permissions-only query would answer that for `perm:` wallets and leave the same question —
+what a subject holds, and through which group — unanswered for budgets, credits and other rights.
+
+**Decision:** The core function `effective_allowances(store, subject, ...)` returns every live wallet of
+the subject and of `groups_of(subject)` as `Allowance(wallet, holder, depth, balance)`, in one
+`find_wallets` call, for any currency and wallet type, whatever the balance, ordered by depth, holder
+position and store order. `allowances_django.permissions.effective_permissions(allowances)` is a pure
+converter: grant allowances in a `perm:` currency with a positive balance, keyed by permission name.
+`AllowancesBackend` builds its permission set as the keys of the converter applied to the user's grant
+allowances.
+
+**Reason:** One read in the library's own terms serves budgets, rights and permissions alike, and works
+for any subject, not only users. Keeping the Django view as a filter means it cannot disagree with what
+the engine sees, and the balance filter stays with the caller, who may want empty wallets listed.
+
+**Cost to revisit:** Low. Both functions are reads; their result types are the public contract.

@@ -30,7 +30,14 @@ Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgradi
   every transaction.
 - Store port methods `lock_wallets`, `add_membership`, `remove_membership`, `memberships_of`,
   `lock_memberships`; `create_transaction` takes `actor=`.
-- Guide page "Rights and permissions".
+- `effective_allowances()` and `Allowance`: every live wallet of a subject and of its groups, of any
+  currency and wallet type, with its holder, depth and effective balance. A snapshot: nothing is
+  locked or written.
+- Django: `shortcuts.effective_allowances()`, and `permissions.effective_permissions()`, which maps the
+  Django permissions among a list of allowances to the allowances conferring them.
+  `AllowancesBackend` computes its permission set with both.
+- Guide pages "Rights and permissions", with a comparison with `django.contrib.auth`, and
+  "Permissions quick start"; section "What a subject holds" in "Concepts".
 
 ### Changed
 

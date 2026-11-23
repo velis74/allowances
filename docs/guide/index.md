@@ -20,12 +20,13 @@ It is **not an authorisation framework**. It has no object-level permissions and
 
 ## As a permissions layer
 
-Rights that are held rather than spent are grant wallets too, and the library serves them as permissions:
+Rights that are held rather than spent are grant wallets too, and the library serves them to Django as permissions — expiring, bought or plan-bound, inherited through nested groups, and each use can be recorded. Any subject can hold a right; `has_perm` answers for users, and other subjects are checked with `peek` / `fulfill`. The [Permissions quick start](/guide/permissions-quick-start) sets it up; [allowances or django.contrib.auth](/guide/permissions#allowances-or-django-contrib-auth) compares it with Django's own permissions.
 
 - A grant wallet at a conversion rate of 0 with a positive balance is a **right**: `peek` checks it, `fulfill` records each use on the ledger at amount 0. Without `valid_until` it is permanent, with one it is *temporary*, and `close_wallet` revokes it.
 - A subject is any `(type, id)` pair, and a subject may be a **member** of other subjects, nested to any depth. A user holds every right of every group it belongs to; a membership that would form a cycle is rejected.
 - The [fulfillment order](/guide/fulfillment-order) is a resolution order: the user's own right, then the team's, then the organisation's — declared as configuration rather than written as an `if` chain.
 - A ledger entry names its **actor**, so a use paid from a group's wallet still shows which member made it.
+- `effective_allowances(subject)` lists every right and balance a subject holds, with the subject or group it comes from; `effective_permissions` picks the Django permissions out of that list.
 - `allowances_django.permissions.AllowancesBackend` answers Django's `has_perm` from grant wallets, so `@permission_required`, `PermissionRequiredMixin`, `ModelAdmin.has_*_permission`, `{% if perms.app.codename %}` and DRF permission classes read them unchanged. It works alone or after `ModelBackend`, and caches a user's permission set on the user object.
 
 Its limits: no object-level permissions, no deny rules, and no admin UI for granting — `grant_permission`, `revoke_permission` and `add_member` are the API. See [Rights and permissions](/guide/permissions).
@@ -57,3 +58,4 @@ The engine sits between them and knows nothing about either's storage. It receiv
 - [Getting started](/guide/getting-started) — install it and make one fulfillment call.
 - [Concepts](/guide/concepts) — subjects, currencies, features, wallets, transactions.
 - [How the port works](/backends/) — if you care about the storage-agnostic part.
+- [Permissions quick start](/guide/permissions-quick-start) — Django permissions answered from allowances.

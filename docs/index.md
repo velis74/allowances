@@ -25,6 +25,9 @@ features:
     details: Nothing is edited in place. Consumption writes a ledger entry, reversal writes a matching storno, and spent-out wallets move to an archive rather than disappearing.
   - title: Spend from several sources
     details: One operation can be paid for out of a specific budget, then general credits, then a promotional grant — at conversion rates you set, with a deterministic priority.
+  - title: Django permissions that expire, nest and leave a record
+    details: Serve has_perm from grant wallets of users, groups nested to any depth, organisations or devices. Rights expire on their own, come with plans or purchases, and every use can be recorded with its actor.
+    link: /guide/permissions-quick-start
   - title: No ORM in the core
     details: The engine talks to a twenty-two-method storage port. Postgres and SQLite via Django ship with it; anything else is an afternoon's work.
 ---

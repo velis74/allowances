@@ -188,6 +188,24 @@ effective_balance(store, wallet, at=None) -> Decimal
 
 The balance that governs decisions. For an ordinary wallet, its stored balance. For a [windowed](/guide/sliding-windows) one, the allotment plus every transaction inside the current window.
 
+### `effective_allowances`
+
+```python
+effective_allowances(store, subject: SubjectRef, *, at=None, wallet_types=None,
+                     currencies=None) -> list[Allowance]
+```
+
+What `subject` holds at `at` (default now): every live wallet of the subject and of every group in `groups_of(subject)`, of any currency and wallet type, each as an [`Allowance`](#allowance) with its holder, depth and effective balance. See [What a subject holds](/guide/concepts#what-a-subject-holds).
+
+| | |
+| --- | --- |
+| `wallet_types` | Iterable of `WalletType`. `None` reads both `GRANT` and `CONSUMABLE`. |
+| `currencies` | Iterable of currency names. `None` reads every currency. |
+
+The wallets of all those subjects are read in one `find_wallets` call, and only wallets valid at `at` are kept. A wallet with a scheduled plan-switch change due at `at` is returned with the change applied, without writing it. Wallets of every balance are listed, zero and negative included; filter on `balance` to keep what is held. The list is ordered by `depth`, then by the holder's position in `groups_of`, then in the store's wallet order.
+
+Locks nothing and writes nothing: like `peek`, the answer is a snapshot.
+
 ### Lock order
 
 `fulfill`, `unfulfill`, `transfer`, `close_wallet`, `plan_switch`, `cancel_scheduled_switch` and `archive_expired_wallets` lock every wallet they use in one `Store.lock_wallets` call, which takes the locks in ascending wallet id, before reading the balances they rely on, and lock no further wallet afterwards. `credit` and `adjust_wallet` lock their one wallet with `get_wallet(..., lock=True)`. A fulfillment record is locked before its wallets. Two operations therefore never wait for each other in a cycle.
@@ -234,6 +252,17 @@ A wallet to open, without saying for whom. Used by `plan_switch` and `open_walle
 ### `SwitchPolicy`
 
 `REPLACE` closes the existing wallet and opens a new one. `ADJUST` keeps it and moves its balance by *new − old allotment*, possibly below zero. `TOP_UP` keeps it and adds only a positive difference; both record the new allotment. On a windowed wallet `ADJUST` and `TOP_UP` both set the per-window allotment to the new amount. A wallet without an allotment, or one whose windowed-ness differs from the spec's, is replaced.
+
+### `Allowance`
+
+One wallet a subject holds, directly or through a group, as `effective_allowances` returns it.
+
+| Field | Type | |
+| --- | --- | --- |
+| `wallet` | `Wallet` | the wallet as it is at `at`, with a due scheduled change applied |
+| `holder` | `SubjectRef` | the wallet's owner: the queried subject or one of its groups |
+| `depth` | `int` | 0 for the subject itself, 1 for a direct group, 2 for a group of a direct group, … |
+| `balance` | `Decimal` | `effective_balance` of the wallet at `at`; for a windowed wallet, the balance left in the current window |
 
 ### `FulfillmentResult`
 

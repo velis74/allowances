@@ -38,6 +38,7 @@ export default defineConfig({
             { text: 'Plans and archival', link: '/guide/plans-and-archival' },
             { text: 'Credits and budgets', link: '/guide/credits-and-budgets' },
             { text: 'Rights and permissions', link: '/guide/permissions' },
+            { text: 'Permissions quick start', link: '/guide/permissions-quick-start' },
           ],
         },
         {

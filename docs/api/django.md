@@ -15,7 +15,7 @@ from allowances_django.shortcuts import (
     peek, fulfill, attach, unfulfill, plan_switch, cancel_scheduled_switch,
     open_wallet, credit, transfer, adjust_wallet, close_wallet, consumed,
     archive_expired_wallets, find_unattached_fulfillment_records,
-    add_member, remove_member, groups_of,
+    add_member, remove_member, groups_of, effective_allowances,
 )
 ```
 
@@ -39,11 +39,15 @@ find_unattached_fulfillment_records(older_than=None, *, store=None)
 add_member(member, group, *, store=None)
 remove_member(member, group, *, store=None) -> bool
 groups_of(obj, *, store=None) -> list
+effective_allowances(subject, *, at=None, wallet_types=None, currencies=None,
+                     store=None) -> list[Allowance]
 ```
 
 `subjects`, `subject`, `member`, `group`, `actor` and `obj` take model instances or refs, interchangeably. `wallet`, `from_wallet` and `to_wallet` take a `Wallet` value, a `Wallet` row or its id. `store=` targets another database; `provider=` swaps the definition source — per-tenant configuration assembled at request time, say. The default provider is `PermissionProvider(SettingsProvider())`: `settings.ALLOWANCES` plus the [`perm:` features](#permissions).
 
 `groups_of` returns the groups as model instances, nearest first; a group whose reference resolves to no existing object is left out.
+
+`effective_allowances` is [`allowances.effective_allowances`](/api/core#effective-allowances) with the store supplied: every live wallet of `subject` (a model instance or a `SubjectRef`) and of its groups, as `Allowance` values whose `holder` is a `SubjectRef`. Wallets of every balance are listed. [`effective_permissions`](#permissions) turns the result into Django permissions.
 
 ```python
 fulfill("send_email", 1, {"user": request.user, "team": team})
@@ -97,7 +101,7 @@ Reads `settings.ALLOWANCES`, or the `config` dict if given — which bypasses se
 
 ## Permissions
 
-`allowances_django.permissions` — Django permissions held as grant wallets. See [Rights and permissions](/guide/permissions).
+`allowances_django.permissions` — Django permissions held as grant wallets. See [Rights and permissions](/guide/permissions) and the [Permissions quick start](/guide/permissions-quick-start).
 
 ```python
 PERMISSION_PREFIX = "perm:"
@@ -106,6 +110,7 @@ permission_feature(perm) -> str
 PermissionProvider(base: DefinitionProvider | None = None)
 grant_permission(subject, perm, *, valid_from=None, valid_until=None, store=None) -> Wallet
 revoke_permission(subject, perm, *, at=None, store=None) -> int
+effective_permissions(allowances: Iterable[Allowance]) -> dict[str, list[Allowance]]
 AllowancesBackend
 ```
 
@@ -117,11 +122,21 @@ AllowancesBackend
 
 `revoke_permission` calls `close_wallet` at `at` (default now) on every live grant wallet of `subject` in that currency that has not ended by then, including wallets that start later, in one unit of work. Returns how many it closed.
 
+`effective_permissions` filters a list of allowances down to Django permissions. It keeps the `GRANT` allowances whose currency starts with `PERMISSION_PREFIX` and whose `balance` is positive, and maps each permission `"app_label.codename"` (the currency without the prefix) to the allowances conferring it, in input order. Keys are sorted. It reads nothing from the database; pass it the output of `effective_allowances`:
+
+```python
+effective_permissions(effective_allowances(user))
+# {"club.change_member": [Allowance(wallet=Wallet(id=7, ...), holder=SubjectRef("auth.group", "1"),
+#                                   depth=1, balance=Decimal("1.000000"))]}
+```
+
+It applies no superuser or `is_active` rule; those belong to `AllowancesBackend`.
+
 `AllowancesBackend` is an authentication backend that authenticates nobody (`authenticate`, `get_user` return `None`) and answers permission checks:
 
 | | |
 | --- | --- |
-| `get_all_permissions(user_obj, obj=None)` | `set()` for an inactive or anonymous user and for any `obj`. Every `Permission` as `"app_label.codename"` for an active superuser. Otherwise the permissions held by grant wallets of the user and of every group in `groups_of(user)` that are valid now and have a positive effective balance. Cached on the user object (`_allowances_perm_cache`). |
+| `get_all_permissions(user_obj, obj=None)` | `set()` for an inactive or anonymous user and for any `obj`. Every `Permission` as `"app_label.codename"` for an active superuser. Otherwise `set(effective_permissions(effective_allowances(user_obj, wallet_types=[WalletType.GRANT])))`: the permissions held by grant wallets of the user and of every group in `groups_of(user)` that are valid now and have a positive effective balance. Cached on the user object (`_allowances_perm_cache`). |
 | `has_perm(user_obj, perm, obj=None)` | `user_obj.is_active` and `perm` in `get_all_permissions(user_obj, obj)`. |
 | `has_module_perms(user_obj, app_label)` | Whether the user is active and holds any permission starting with `app_label + "."`. |
 

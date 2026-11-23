@@ -1,6 +1,6 @@
 # allowances
 
-Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend.
+Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend that also serves Django permissions: expiring, inherited through nested groups, held by any model, and each use can be recorded.
 
 📖 **Documentation:** [docs.velis.si/allowances](https://docs.velis.si/allowances). The source lives in `docs/` — `npm install && npm run docs:dev` serves it locally.
 
@@ -13,6 +13,8 @@ Applications keep needing to answer the same shape of question:
 > Can this user send an email right now? How many API calls does this organisation have left this month? Does this device still have a service contract, and does the customer have enough coolant credit to fill it?
 
 `allowances` answers it, records what the answer cost, and lets you take it back if the operation it paid for never happened.
+
+The same wallets hold rights that are not spent. In Django they answer `user.has_perm`, `@permission_required` and `{% if perms.… %}` through an authentication backend — see the [Permissions quick start](https://docs.velis.si/allowances/guide/permissions-quick-start).
 
 It is **not a payment system** — no invoices, no card charges, no money anywhere. The units it counts are whatever you say they are. Use it for rights that are bought, expire, or get spent.
 
@@ -94,11 +96,18 @@ Highlights:
 
 ## As a permissions layer
 
-Rights that are held rather than spent are grant wallets too. A grant at a conversion rate of 0 with a positive balance is a right: `peek` checks it, `fulfill` records each use on the ledger at amount 0, `valid_until` makes it temporary and `close_wallet` revokes it. Subjects can be members of groups, nested to any depth and checked for cycles, and hold their groups' rights; every entry can name the actor it was made for.
+`allowances_django.permissions.AllowancesBackend` answers Django's permission checks from grant wallets, so everything that calls `has_perm` — views, templates, the admin, DRF — reads them. It does what `django.contrib.auth` permissions do not:
 
-The Django adapter includes a grant-only authentication backend, `allowances_django.permissions.AllowancesBackend`, that answers `has_perm` from those wallets, alone or chained after `ModelBackend`:
+- **Rights that end.** A grant has `valid_from` and `valid_until` and stops counting on its own, without a cleanup job.
+- **Groups of groups, and groups that are not `auth.Group`.** Any model can be a group — a department, an organisation, a club — nested to any depth; a membership that would form a cycle is rejected.
+- **Rights held by anything.** A device, an organisation or a club membership holds and inherits rights as a user does.
+- **Rights that are bought, come with a plan or are used up.** A right is a wallet, so `plan_switch` and purchases grant it like a quota, and a right can allow *n* uses.
+- **A record of use and of origin.** `fulfill` writes each use to the ledger with its actor; `effective_allowances` lists every right and balance with the subject or group it comes from.
 
 ```python
+# settings.py
+INSTALLED_APPS = [..., "allowances_django"]
+
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
     "allowances_django.permissions.AllowancesBackend",
@@ -106,15 +115,30 @@ AUTHENTICATION_BACKENDS = [
 ```
 
 ```python
-from allowances_django.permissions import grant_permission
-from allowances_django.shortcuts import add_member
+from datetime import timedelta
 
-add_member(user, board)
-grant_permission(board, "club.change_member")
-user.has_perm("club.change_member")   # True
+from django.contrib.auth.models import Group, User
+from django.utils import timezone
+
+from allowances_django.permissions import effective_permissions, grant_permission
+from allowances_django.shortcuts import add_member, effective_allowances
+
+user = User.objects.get(username="ana")
+editors = Group.objects.create(name="editors")
+add_member(user, editors)
+grant_permission(editors, "club.change_member", valid_until=timezone.now() + timedelta(days=90))
+
+user.has_perm("club.change_member")   # True (on a freshly loaded user)
+
+effective_permissions(effective_allowances(user))
+# {"club.change_member": [Allowance(wallet=Wallet(...), holder=SubjectRef("auth.group", "1"),
+#                                   depth=1, balance=Decimal("1.000000"))]}
 ```
 
-It has no object-level permissions, no deny rules and no admin UI for granting. See [Rights and permissions](https://docs.velis.si/allowances/guide/permissions).
+`effective_allowances` returns everything the user holds, budgets and rights alike, in the library's terms; `effective_permissions` keeps the Django permissions. The backend works alone or chained after `ModelBackend`. It has no object-level permissions, no deny rules and no admin UI for granting.
+
+- [Permissions quick start](https://docs.velis.si/allowances/guide/permissions-quick-start)
+- [Rights and permissions, and how they compare with Django's](https://docs.velis.si/allowances/guide/permissions)
 
 ## Development
 

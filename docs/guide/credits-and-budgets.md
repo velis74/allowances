@@ -10,6 +10,7 @@ A plan is one way to fund a wallet. Others are common enough to have recipes: cr
 | `close_wallet(wallet)` | Ends a wallet now, without a ledger entry. |
 | `adjust_wallet(wallet, allotment)` | Changes the allotment of a wallet opened with an `adjust` or `top_up` policy — a limit raised or lowered. |
 | `consumed(wallet, since, until)` | Net amount drawn from a wallet in a period, reversals deducted. |
+| `effective_allowances(subject)` | Lists every wallet a subject holds, its own and its groups', with the effective balance — see [What a subject holds](/guide/concepts#what-a-subject-holds). |
 | `(wallet_type, subject, source)` steps | Orders wallets of one subject and currency by where they came from. |
 
 The library holds and enforces balances. Charging a card, issuing an invoice and deciding prices stay in the host application; these recipes show where the two meet.

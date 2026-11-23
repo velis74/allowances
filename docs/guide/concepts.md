@@ -127,6 +127,26 @@ groups_of(user)   # [team, organisation]
 
 Memberships are state — rows in the store, changed with `add_member` and `remove_member`.
 
+## What a subject holds
+
+`effective_allowances` lists everything a subject holds and where each holding comes from: every live wallet of the subject and of its groups, of any currency and wallet type, with its effective balance.
+
+```python
+from allowances_django.shortcuts import effective_allowances
+
+for allowance in effective_allowances(user):
+    print(allowance.holder, allowance.depth, allowance.wallet.wallet_type,
+          allowance.wallet.currency, allowance.balance)
+
+# auth.user:5 0 consumable email_send 153.000000
+# myapp.team:2 1 consumable email_send 1000.000000
+# myapp.organisation:1 2 grant perm:club.view_member 1.000000
+```
+
+Each entry is an [`Allowance`](/api/core#allowance): the `wallet`, its `holder` (the subject itself or one of its groups), the `depth` of the holder (0 for the subject, 1 for a direct group, 2 for a group of that group) and the `balance` that governs decisions — for a [windowed](/guide/sliding-windows) wallet, what is left in the current window. The list is ordered nearest holder first. `wallet_types=` and `currencies=` narrow it; `at=` asks about another instant.
+
+Wallets of every balance are listed, so an empty budget shows as 0 rather than disappearing; keep `balance > 0` for what can still be spent. Nothing is locked or written: the list is a snapshot, like `peek`. [Django permissions](/guide/permissions#effective-permissions) are one filter of it.
+
 ## Modifier
 
 A time-limited, subject-scoped factor that changes what a feature costs — a discount, a promotion, a penalty rate. Where several apply, the subject gets the most favourable one.
