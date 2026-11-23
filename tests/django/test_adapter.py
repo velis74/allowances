@@ -241,6 +241,7 @@ def test_a_fulfillment_record_survives_its_transactions_being_archived(alice, pr
 
 def test_archived_transactions_keep_pointing_at_the_entries_they_reversed(alice, provider):
     from dataclasses import replace
+    from datetime import timedelta
 
     from allowances.engine import archive_expired_wallets, fulfill, unfulfill
     from allowances.windows import utcnow
@@ -253,7 +254,7 @@ def test_archived_transactions_keep_pointing_at_the_entries_they_reversed(alice,
     unfulfill(store, result.guid)
 
     now = utcnow()
-    store.save_wallet(replace(store.get_wallet(wallet.id), valid_until=now))
+    store.save_wallet(replace(store.get_wallet(wallet.id), valid_until=now - timedelta(seconds=1)))
     assert archive_expired_wallets(store, at=now) == 1
 
     archive = WalletArchive.objects.get(original_wallet_id=wallet.id)

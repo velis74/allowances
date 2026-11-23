@@ -341,3 +341,12 @@ class Membership(models.Model):
 
     def __str__(self):
         return f"Membership({self.member_type}:{self.member_id} in {self.group_type}:{self.group_id})"
+
+
+class AllowancesLock(models.Model):
+    """A named row that operations lock with ``SELECT ... FOR UPDATE`` to serialise one kind of change."""
+
+    name = models.CharField(max_length=NAME_MAX_LENGTH, primary_key=True)
+
+    def __str__(self):
+        return f"AllowancesLock({self.name})"

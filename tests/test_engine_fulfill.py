@@ -231,15 +231,16 @@ def test_allow_partial_keeps_whatever_was_available(store, alice, provider):
     assert transaction_count(store) == 1
 
 
-def test_the_most_favourable_modifier_wins(store, alice, provider):
+def test_the_smallest_modifier_wins(store, alice, provider):
     wallet = open_wallet(store, alice, balance="10")
-    add_modifier(store, subject=alice, feature="send_email", factor="0.5")
     add_modifier(store, subject=alice, feature="send_email", factor="0.8")
+    add_modifier(store, subject=alice, feature="send_email", factor="0.5")
+    add_modifier(store, subject=alice, feature="send_email", factor="2")
 
     result = fulfill(store, "send_email", 5, {"device": alice}, provider)
 
-    assert result.modifier_applied == Decimal("0.8")
-    assert store.get_wallet(wallet.id).balance == Decimal("6")  # 10 - 5 × 0.8
+    assert result.modifier_applied == Decimal("0.5")
+    assert store.get_wallet(wallet.id).balance == Decimal("7.5")  # 10 - 5 × 0.5
 
 
 def test_an_expired_modifier_is_ignored(store, alice, provider):

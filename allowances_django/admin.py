@@ -4,8 +4,10 @@ Admin for the ledger.
 Transactions, memberships and the archive tables cannot be added or changed in the admin; deletion
 is allowed. Wallets, fulfilment records and licence modifiers are editable. A balance edited here
 has no ledger entry; :mod:`allowances_django.shortcuts` writes a transaction for every change.
+With ``settings.ALLOWANCES_ADMIN_READ_ONLY = True`` every model is view-only.
 """
 
+from django.conf import settings
 from django.contrib import admin
 
 from allowances.types import SubjectRef
@@ -21,6 +23,24 @@ from allowances_django.models import (
 from allowances_django.subjects import resolve
 
 
+def admin_read_only() -> bool:
+    """``settings.ALLOWANCES_ADMIN_READ_ONLY``, read on every call; default ``False``."""
+    return bool(getattr(settings, "ALLOWANCES_ADMIN_READ_ONLY", False))
+
+
+class AllowancesModelAdmin(admin.ModelAdmin):
+    """No add, change or delete while :func:`admin_read_only` is true; viewing follows Django's view permission."""
+
+    def has_add_permission(self, request):
+        return not admin_read_only() and super().has_add_permission(request)
+
+    def has_change_permission(self, request, obj=None):
+        return not admin_read_only() and super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        return not admin_read_only() and super().has_delete_permission(request, obj)
+
+
 class SubjectDisplayMixin:
     @admin.display(description="Subject")
     def subject(self, obj):
@@ -29,7 +49,7 @@ class SubjectDisplayMixin:
 
 
 @admin.register(Wallet)
-class WalletAdmin(SubjectDisplayMixin, admin.ModelAdmin):
+class WalletAdmin(SubjectDisplayMixin, AllowancesModelAdmin):
     list_display = ("id", "subject", "wallet_type", "currency", "source", "balance", "valid_from", "valid_until")
     list_filter = ("wallet_type", "currency", "source")
     search_fields = ("subject_type", "subject_id", "currency")
@@ -37,14 +57,14 @@ class WalletAdmin(SubjectDisplayMixin, admin.ModelAdmin):
 
 
 @admin.register(FulfillmentRecord)
-class FulfillmentRecordAdmin(admin.ModelAdmin):
+class FulfillmentRecordAdmin(AllowancesModelAdmin):
     list_display = ("guid", "created_at")
     search_fields = ("guid",)
     date_hierarchy = "created_at"
 
 
 @admin.register(Transaction)
-class TransactionAdmin(admin.ModelAdmin):
+class TransactionAdmin(AllowancesModelAdmin):
     list_display = ("id", "wallet", "kind", "amount", "feature", "actor", "created_at")
     list_filter = ("kind", "feature")
     search_fields = ("feature", "object_type", "object_id", "actor_type", "actor_id")
@@ -62,7 +82,7 @@ class TransactionAdmin(admin.ModelAdmin):
 
 
 @admin.register(Membership)
-class MembershipAdmin(admin.ModelAdmin):
+class MembershipAdmin(AllowancesModelAdmin):
     """No add or change: memberships change through ``add_member`` and ``remove_member``, which reject cycles."""
 
     list_display = ("id", "member", "group", "created_at")
@@ -87,14 +107,14 @@ class MembershipAdmin(admin.ModelAdmin):
 
 
 @admin.register(LicenseModifier)
-class LicenseModifierAdmin(SubjectDisplayMixin, admin.ModelAdmin):
+class LicenseModifierAdmin(SubjectDisplayMixin, AllowancesModelAdmin):
     list_display = ("id", "subject", "feature", "factor", "valid_from", "valid_until")
     list_filter = ("feature",)
     search_fields = ("subject_type", "subject_id", "feature")
 
 
 @admin.register(WalletArchive)
-class WalletArchiveAdmin(SubjectDisplayMixin, admin.ModelAdmin):
+class WalletArchiveAdmin(SubjectDisplayMixin, AllowancesModelAdmin):
     list_display = ("id", "original_wallet_id", "subject", "currency", "final_balance", "archived_at")
     list_filter = ("wallet_type", "currency")
     search_fields = ("subject_type", "subject_id", "currency")
@@ -108,7 +128,7 @@ class WalletArchiveAdmin(SubjectDisplayMixin, admin.ModelAdmin):
 
 
 @admin.register(TransactionArchive)
-class TransactionArchiveAdmin(admin.ModelAdmin):
+class TransactionArchiveAdmin(AllowancesModelAdmin):
     list_display = ("id", "original_transaction_id", "original_wallet_id", "kind", "amount", "archived_at")
     list_filter = ("kind", "feature")
     date_hierarchy = "archived_at"

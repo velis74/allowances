@@ -76,6 +76,35 @@ def test_the_sweep_leaves_wallets_that_expire_in_the_future_alone(store, alice):
     assert store.get_wallet(wallet.id) is not None
 
 
+def test_a_wallet_is_not_archived_at_the_instant_it_expires(store, alice):
+    now = utcnow()
+    wallet = open_wallet(store, alice, balance="7", valid_until=now)
+
+    assert store.find_expired_wallets(at=now) == []
+    assert archive_expired_wallets(store, at=now) == 0
+    assert store.get_wallet(wallet.id) is not None
+
+
+def test_a_wallet_still_funds_a_request_at_the_instant_it_expires(store, alice, provider):
+    now = utcnow()
+    wallet = open_wallet(store, alice, balance="7", valid_until=now)
+
+    result = fulfill(store, "send_email", 2, {"device": alice}, provider, at=now)
+
+    assert result.satisfied is True
+    assert store.get_wallet(wallet.id).balance == Decimal("5")
+
+
+def test_a_wallet_is_archived_once_its_expiry_has_passed(store, alice):
+    now = utcnow()
+    wallet = open_wallet(store, alice, balance="7", valid_until=now)
+    later = now + timedelta(microseconds=1)
+
+    assert [w.id for w in store.find_expired_wallets(at=later)] == [wallet.id]
+    assert archive_expired_wallets(store, at=later) == 1
+    assert store.get_wallet(wallet.id) is None
+
+
 def test_archiving_carries_the_whole_transaction_history_along(store, alice, provider):
     from dataclasses import replace
 

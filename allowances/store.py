@@ -125,7 +125,7 @@ class Store(Protocol):
         ...
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
-        """Wallets whose ``valid_until`` is set and ``<= at``, ordered by ``(created_at, id)``."""
+        """Wallets whose ``valid_until`` is set and ``< at``, ordered by ``(created_at, id)``."""
         ...
 
     def archive_wallet(self, wallet: Wallet) -> None:
@@ -223,7 +223,10 @@ class Store(Protocol):
         ...
 
     def lock_memberships(self) -> None:
-        """Serialise membership changes for the rest of the current unit of work."""
+        """
+        Serialise membership changes for the rest of the current unit of work, on every database
+        the backend supports.
+        """
         ...
 
     # -- modifiers -----------------------------------------------------------------------------

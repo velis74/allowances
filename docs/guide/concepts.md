@@ -182,7 +182,7 @@ still be consumed. Nothing is locked or written: the list is a snapshot, like `p
 ## Modifier
 
 A time-limited, subject-scoped factor that changes what a feature costs: a discount, a promotion, a penalty rate.
-Where several apply, the highest factor is used.
+Where several apply, the smallest factor is used: the lowest cost, the most favourable to the subject.
 
 ```python
 LicenseModifier.objects.create(

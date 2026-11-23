@@ -293,11 +293,11 @@ def _consume(
 
 
 def _modifier_factor(store: Store, feature: str, subjects: list[SubjectRef], at: datetime) -> Decimal:
-    """The factor of the modifiers that apply; where several apply, the largest factor is used."""
+    """The factor of the modifiers that apply; where several apply, the smallest factor is used."""
     if not subjects:
         return Decimal("1")
     factors = store.find_modifier_factors(feature=feature, subjects=subjects, at=at)
-    return max(factors) if factors else Decimal("1")
+    return min(factors) if factors else Decimal("1")
 
 
 def _plan(
@@ -354,7 +354,8 @@ def _archive_if_drained(store: Store, wallet: Wallet) -> bool:
 
 def archive_expired_wallets(store: Store, at: datetime | None = None) -> int:
     """
-    Archive wallets whose ``valid_until`` has passed. Returns how many were archived.
+    Archive wallets whose ``valid_until`` is before ``at``; a wallet is still valid at its
+    ``valid_until``. Returns how many were archived.
 
     Fulfilment does not draw from or archive expired wallets. Call this periodically (Celery beat,
     cron, a management command). A scheduled plan-switch adjustment due at ``at`` is written before
@@ -370,7 +371,7 @@ def archive_expired_wallets(store: Store, at: datetime | None = None) -> int:
             if wallet is None:
                 continue
             wallet = _settle(store, wallet, at)
-            if wallet.valid_until is None or wallet.valid_until > at:
+            if wallet.valid_until is None or wallet.valid_until >= at:
                 continue
             store.archive_wallet(wallet)
             archived += 1

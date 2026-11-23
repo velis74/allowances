@@ -85,7 +85,7 @@ Without the right, `peek` returns `satisfied=False` and `fulfill` raises `Insuff
 
 ## Temporary rights and revoking
 
-A wallet with `valid_until` is a temporary right: it is not held from that instant on; no scheduled job is needed.
+A wallet with `valid_until` is a temporary right: it is not held after that instant; no scheduled job is needed.
 
 ```python
 WalletSpec(WalletType.GRANT, "club_admin", Decimal("1"), valid_until=end_of_season)

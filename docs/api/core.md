@@ -186,7 +186,8 @@ budget](/guide/credits-and-budgets#postpaid-budget).
 archive_expired_wallets(store, at=None) -> int
 ```
 
-Move wallets past their `valid_until` into the archive. Returns how many. Run it from a periodic job: fulfilment
+Move wallets whose `valid_until` is before `at` into the archive; a wallet is still valid at its `valid_until`.
+Returns how many. Run it from a periodic job: fulfilment
 ignores expired wallets and no other operation archives them.
 
 ### `find_unattached_fulfillment_records`
@@ -337,7 +338,8 @@ One wallet a subject holds, directly or through a group, as `effective_allowance
 
 `requested`, `granted`, `satisfied`, `transactions`, `guid`, `modifier_applied`.
 
-`modifier_applied` is `None` when no modifier changed the cost.
+`modifier_applied` is the factor used, the smallest of the modifiers that apply; `None` when no modifier changed the
+cost.
 
 ### `WalletType` / `TransactionKind`
 

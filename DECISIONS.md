@@ -199,6 +199,8 @@ favourable" as `max`, and the engine follows that definition.
 `_modifier_factor()`; no schema impact. Under `max()`, a modifier below 1 (a discount) takes
 effect only when no other modifier with a larger factor applies to the same request.
 
+> **Superseded by [42](#_42-several-modifiers-combine-as-min-factors).** The smallest factor applies.
+
 ## 12. Overdraft: the feature flag gates *whether* a second pass runs, `overdraft_limit` *which* wallets
 
 **Dilemma:** README/NEXT_STEPS say "a second pass is made over wallets with `overdraft: true`" —
@@ -883,6 +885,9 @@ Rejecting cycles at write time keeps the data acyclic (a DAG); tolerating them a
 corrupted table from hanging a request. An advisory lock serialises only membership writers, not the
 whole membership table.
 
+> **Lock superseded by [43](#_43-lock-memberships-is-a-row-lock-on-every-database).** `lock_memberships` locks a
+> row of `AllowancesLock` on every database.
+
 **Cost to revisit:** Medium. Expansion order is observable in which wallet pays; changing it changes
 charges.
 
@@ -930,3 +935,39 @@ for any subject, not only users. Keeping the Django view as a filter means it ca
 the engine sees, and the balance filter stays with the caller, who may want empty wallets listed.
 
 **Cost to revisit:** Low. Both functions are reads; their result types are the public contract.
+
+## 42. Several modifiers combine as `min(factors)`
+
+**Dilemma:** Where several modifiers apply to one request, one factor has to be chosen. A factor below 1 is a
+discount and a factor above 1 a surcharge, so "the most favourable" for the subject is the smallest factor, while
+entry 11 read it as `max`.
+
+**Decision:** `_modifier_factor()` returns `min(factors)`; 1 when no modifier applies.
+
+**Reason:** A modifier is a cost multiplier: the smallest factor is the lowest cost, the one most favourable to the
+subject. Under `max`, a discount takes effect only when no larger factor applies, so a granted promotion is silently
+lost whenever any other modifier exists.
+
+**Cost to revisit:** Low. A one-line change with no schema impact; it changes what requests with several modifiers
+cost.
+
+## 43. `lock_memberships` is a row lock on every database
+
+**Dilemma:** `lock_memberships` must serialise membership changes on every database Django supports. A
+PostgreSQL advisory lock leaves MySQL, MariaDB and Oracle without a lock, where two concurrent `add_member` calls can
+each pass the cycle check and together form a cycle.
+
+**Decision:** Model `AllowancesLock` with a `name` primary key. `DjangoStore.lock_memberships` selects the row
+`"membership"` with `SELECT ... FOR UPDATE`, held until the unit of work ends. The migration creates the row. A missing
+row is inserted in the caller's transaction; when a concurrent transaction inserted it first, the select is repeated,
+and when the isolation level hides that row (REPEATABLE READ, SERIALIZABLE), `OperationalError` is raised and a retry
+succeeds. SQLite has no `FOR UPDATE`; its `IMMEDIATE` write lock serialises writers.
+
+**Reason:** `SELECT ... FOR UPDATE` on one row works on every backend that has it and needs no vendor-specific SQL.
+It still serialises only membership writers. Creating the row on demand keeps the lock working when the table is
+emptied (test truncation, a restored dump), which a data migration alone does not. The row is missing
+only after the table was emptied, so the races there (a hidden row under REPEATABLE READ, a gap-lock deadlock on MySQL)
+end in an error that a retry resolves, never in an unlocked membership change. A separate connection for the insert
+would avoid the error but adds a connection outside the caller's transaction and its test isolation.
+
+**Cost to revisit:** Low. One table and one store method; the port contract is unchanged.

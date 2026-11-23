@@ -54,7 +54,7 @@ breadth-first, each group once. Without memberships the list holds only the subj
   the organisation's.
 - A step with subject `None` walks every expanded subject: each key's list, in the order you passed the keys.
 - A callable `fulfillment_order` receives the candidates of every expanded subject.
-- [Modifiers](#modifiers) are looked up for every expanded subject; the largest factor applies.
+- [Modifiers](#modifiers) are looked up for every expanded subject; the smallest factor applies.
 - A wallet is drawn at most once, even when a group is reachable from two keys.
 
 Given `add_member(user, team)`, `fulfill("send_email", 1, {"user": user})` with the order `[("consumable", "user")]`
@@ -110,7 +110,8 @@ The value can also be the function object instead of a dotted path:
 ## Modifiers
 
 A [modifier](/guide/concepts#modifier) multiplies the cost after the rate but before rounding, and it applies equally
-to every wallet in the walk. A modifier does not change the draw order.
+to every wallet in the walk. Where several apply, the smallest factor is used. A modifier does not change the draw
+order.
 
 ## Worked example
 

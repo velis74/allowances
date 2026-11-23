@@ -3,14 +3,18 @@ Concurrent transfers, transfers and reversals alongside fulfilment, and concurre
 changes: no deadlock, exact balances, and no membership cycle stored.
 """
 
+import threading
+
 from decimal import Decimal
 
 import pytest
 
+from django.db import connection, DatabaseError, OperationalError, transaction as db_transaction
+
 from allowances.engine import add_member, credit, fulfill, transfer, unfulfill
 from allowances.errors import InsufficientBalanceError, MembershipCycleError
 from allowances.types import SubjectRef, TransactionKind
-from allowances_django.models import Membership, Transaction, TransactionArchive, Wallet
+from allowances_django.models import AllowancesLock, Membership, Transaction, TransactionArchive, Wallet
 from allowances_django.store import DjangoStore
 from tests.conftest import CREDITS, provider_with
 from tests.django.test_concurrency import run_concurrently
@@ -206,3 +210,92 @@ def test_opposite_memberships_added_at_once_store_no_cycle():
             group_id__in=[first.id, second.id],
         )
         assert stored.count() == 1
+
+
+def test_add_member_works_after_the_lock_table_was_emptied():
+    AllowancesLock.objects.all().delete()
+
+    add_member(DjangoStore(), SubjectRef("auth.user", 1), SubjectRef("auth.group", 1))
+
+    assert Membership.objects.filter(member_id=1, group_id=1).count() == 1
+    if connection.features.has_select_for_update:
+        assert AllowancesLock.objects.filter(name="membership").exists()
+
+
+def test_opposite_memberships_added_at_once_after_the_lock_table_was_emptied_store_no_cycle():
+    for pair in range(10):
+        AllowancesLock.objects.all().delete()
+        first, second = SubjectRef("auth.group", 2 * pair + 1), SubjectRef("auth.group", 2 * pair + 2)
+
+        def join(index, first=first, second=second):
+            member, group = (first, second) if index % 2 else (second, first)
+            add_member(DjangoStore(), member, group)
+
+        outcomes = run_concurrently(join, count=2)
+
+        assert sum(o is None for o in outcomes) == 1, outcomes
+        assert sum(isinstance(o, MembershipCycleError) for o in outcomes) == 1, outcomes
+        stored = Membership.objects.filter(
+            member_type="auth.group",
+            member_id__in=[first.id, second.id],
+            group_id__in=[first.id, second.id],
+        )
+        assert stored.count() == 1
+
+
+@pytest.mark.skipif(connection.vendor != "postgresql", reason="needs PostgreSQL REPEATABLE READ")
+def test_lock_row_created_after_the_snapshot_under_repeatable_read_raises_then_a_retry_works():
+    AllowancesLock.objects.all().delete()
+    alice, editors = SubjectRef("auth.user", 1), SubjectRef("auth.group", 1)
+
+    def create_lock_row_elsewhere():
+        try:
+            AllowancesLock.objects.create(name="membership")
+        finally:
+            connection.close()
+
+    with pytest.raises(OperationalError), db_transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        assert not AllowancesLock.objects.exists()  # takes the snapshot
+        other = threading.Thread(target=create_lock_row_elsewhere)
+        other.start()
+        other.join(10)
+        add_member(DjangoStore(), alice, editors)
+
+    with db_transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        add_member(DjangoStore(), alice, editors)
+
+    assert Membership.objects.filter(member_id=1, group_id=1).count() == 1
+
+
+@pytest.mark.skipif(not connection.features.has_select_for_update_nowait, reason="needs SELECT ... FOR UPDATE NOWAIT")
+def test_lock_memberships_holds_a_row_lock_until_the_unit_of_work_ends():
+    with DjangoStore().unit_of_work():
+        DjangoStore().lock_memberships()  # commits the lock row, so the other connection sees it
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        try:
+            store = DjangoStore()
+            with store.unit_of_work():
+                store.lock_memberships()
+                held.set()
+                release.wait(10)
+        finally:
+            connection.close()
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(10)
+        with pytest.raises(DatabaseError), db_transaction.atomic():
+            AllowancesLock.objects.select_for_update(nowait=True).get(name="membership")
+    finally:
+        release.set()
+        holder.join(10)
+
+    with db_transaction.atomic():
+        assert AllowancesLock.objects.select_for_update(nowait=True).get(name="membership")
