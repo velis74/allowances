@@ -19,17 +19,29 @@ Documentation = "https://docs.velis.si/allowances"
 [project.optional-dependencies]
 # Django 5.2 (LTS) to 6.x; CI tests 5.2, 6.0 and 6.1.
 django = ["Django>=5.2,<7"]
+# The adorm store (allowances_adorm). adorm[asyncpg] adds the native PostgreSQL driver.
+adorm = ["adorm[django]>=0.1,<0.2"]
 
 [dependency-groups]
-dev = ["Django>=5.2,<7", "pytest", "pytest-django", "psycopg2-binary", "coverage", "ruff"]
+dev = [
+    "Django>=5.2,<7",
+    "adorm[asyncpg,django]>=0.1,<0.2",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-django",
+    # psycopg 3: adorm's native PostgreSQL driver needs Django's PostgreSQL backend on psycopg 3.
+    "psycopg[binary]",
+    "coverage",
+    "ruff",
+]
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-# Two top-level packages in the repository root: the core and the Django backend.
-module-name = ["allowances", "allowances_django"]
+# Three top-level packages in the repository root: the core, the Django backend and the adorm store.
+module-name = ["allowances", "allowances_django", "allowances_adorm"]
 module-root = ""
 
 [tool.publish]
@@ -43,11 +55,14 @@ DJANGO_SETTINGS_MODULE = "tests.settings"
 pythonpath = ["."]
 python_files = "test_*.py"
 testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 120
 # Markdown is excluded: ruff would format the Python code blocks in the documentation.
-exclude = ["*/migrations/*", "*.md", "node_modules"]
+# Generated adorm models are checked by `adorm generate --check`, not formatted by ruff.
+exclude = ["*/migrations/*", "*.md", "node_modules", "allowances_adorm/models/*"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
@@ -68,7 +83,8 @@ combine-as-imports = true
 order-by-type = false
 
 [tool.coverage.run]
-source = ["allowances", "allowances_django"]
+source = ["allowances", "allowances_django", "allowances_adorm"]
+omit = ["allowances_adorm/models/*"]
 branch = true
 
 [tool.coverage.report]
