@@ -6,6 +6,19 @@ Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgradi
 
 ### Added
 
+- `allowances.sync`: every engine function of `allowances` as a plain function with the same signature, run to
+  completion without an event loop, plus `unit_of_work(store)` as a synchronous context manager and the re-exported
+  types, errors and definitions. `allowances.sync.driver.run()` and `synchronous()`. `StoreSuspendedError`, raised when
+  a call through `allowances.sync` suspends.
+- Django: `allowances_django.sync.shortcuts`, `allowances_django.sync.permissions` and
+  `allowances_django.sync.store.DjangoStore`, the synchronous API over a store that runs the ORM on the calling thread.
+- Django settings `ALLOWANCES_STORE` (default `"allowances_django.store.DjangoStore"`) and `ALLOWANCES_SYNC_STORE`
+  (default `"allowances_django.sync.store.DjangoStore"`): the default stores of the asynchronous and the synchronous
+  shortcuts, permissions and permission checks. `AllowancesBackend.get_sync_store()`.
+- `allowances_adorm.store.AdormStore` (extra `allowances[adorm]`): the store port on adorm, over the
+  `allowances_django` tables, on adorm's Django driver and on its native asyncpg driver. Generated adorm models in
+  `allowances_adorm.models`.
+- Guide page "Synchronous API" and backend page "adorm".
 - Rights: a wallet whose effective rate for a feature is 0 and whose balance is positive covers the
   whole request at cost 0. `peek` checks it; `fulfill` records the use as a `consumption` entry of
   amount 0; `unfulfill` reverses it with `storno` entries of amount 0.
@@ -47,6 +60,19 @@ Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgradi
 
 ### Changed
 
+- The API is asynchronous (breaking): every engine function of `allowances`, every shortcut of
+  `allowances_django.shortcuts` and `grant_permission` / `revoke_permission` are coroutine functions with unchanged
+  names and signatures. Synchronous code imports them from `allowances.sync`, `allowances_django.sync.shortcuts` and
+  `allowances_django.sync.permissions`.
+- Store port (breaking for custom backends): every method is a coroutine function and `unit_of_work()` returns an
+  asynchronous context manager. `MemoryStore` follows it and never suspends.
+- Django: `allowances_django.store.DjangoStore` is the store of the asynchronous API. Outside a unit of work its calls
+  run through `sync_to_async`; a unit of work runs on one thread of its own with its own connection. Without a running
+  event loop it raises `StoreSuspendedError`. The ORM queries of both Django stores are in
+  `allowances_django.queries.DjangoQueries`.
+- `AllowancesBackend`: `has_perm`, `get_all_permissions` and `has_module_perms` use the synchronous API and
+  `get_sync_store()`; `ahas_perm`, `aget_all_permissions` and `ahas_module_perms` use the asynchronous API and
+  `get_store()`. Both share the per-user cache.
 - Store port (breaking for custom backends): the five new methods above and the `actor` keyword of
   `create_transaction` are required. Wallet ids of one store must be mutually comparable.
 - `find_unattached_fulfillment_records` and `Store.records_with_unattached_transactions` consider only

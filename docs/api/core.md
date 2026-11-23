@@ -2,15 +2,17 @@
 
 Everything in `allowances`. It depends only on the standard library.
 
-Every engine function takes `store` first. On Django, [the shortcuts](/api/django#shortcuts) supply the store and the
-provider.
+Every engine function takes `store` first and is a coroutine function: its call is awaited. The engine awaits nothing
+but store methods. Types, definitions, errors and `window_start` are plain. On Django,
+[the shortcuts](/api/django#shortcuts) supply the store and the provider. [`allowances.sync`](#allowances-sync) has
+every engine function as a plain function.
 
 ## Engine
 
 ### `peek`
 
 ```python
-peek(store, feature, quantity, subjects, provider, at=None) -> FulfillmentResult
+async def peek(store, feature, quantity, subjects, provider, at=None) -> FulfillmentResult
 ```
 
 Whether a request could be met. Runs the same planning walk as `fulfill`, with `subjects` expanded by their groups, and
@@ -22,8 +24,8 @@ expanded subject makes the answer satisfied.
 ### `fulfill`
 
 ```python
-fulfill(store, feature, quantity, subjects, provider,
-        guid=None, allow_partial=False, at=None, *, actor=None) -> FulfillmentResult
+async def fulfill(store, feature, quantity, subjects, provider,
+                  guid=None, allow_partial=False, at=None, *, actor=None) -> FulfillmentResult
 ```
 
 Consume the licence, writing one transaction per wallet drawn from. A wallet whose effective rate is 0 and whose balance
@@ -48,7 +50,7 @@ rolls back; the exception carries the result the call would have returned.
 ### `attach`
 
 ```python
-attach(store, guid, obj: ObjectRef) -> None
+async def attach(store, guid, obj: ObjectRef) -> None
 ```
 
 Point every not-yet-attached transaction under `guid` at the domain object it paid for. Already-attached transactions
@@ -57,7 +59,7 @@ are left alone. Raises `RecordNotFoundError` for an unknown guid.
 ### `unfulfill`
 
 ```python
-unfulfill(store, guid, at=None, *, actor=None) -> None
+async def unfulfill(store, guid, at=None, *, actor=None) -> None
 ```
 
 Reverse everything under `guid` — consumption, credits and transfers — by writing matching storno entries, each recorded
@@ -77,8 +79,8 @@ The record is locked first, then every wallet its transactions touch, in one `lo
 ### `plan_switch`
 
 ```python
-plan_switch(store, subjects, open_wallets: Sequence[WalletSpec],
-            effective_date=None) -> list[Wallet]
+async def plan_switch(store, subjects, open_wallets: Sequence[WalletSpec],
+                      effective_date=None) -> list[Wallet]
 ```
 
 Move these subjects onto the plan described by `open_wallets`, atomically. Only wallets with `source == "plan"` take
@@ -93,7 +95,7 @@ switch](/guide/plans-and-archival#plan-switch) and [Switch policies](/guide/plan
 ### `cancel_scheduled_switch`
 
 ```python
-cancel_scheduled_switch(store, subjects) -> int
+async def cancel_scheduled_switch(store, subjects) -> int
 ```
 
 Cancel the not-yet-effective switch of these subjects: closed wallets get their previous `valid_until` back, scheduled
@@ -103,8 +105,8 @@ cancelled.
 ### `open_wallet`
 
 ```python
-open_wallet(store, subject: SubjectRef, spec: WalletSpec, *, source: str,
-            effective_date=None) -> Wallet
+async def open_wallet(store, subject: SubjectRef, spec: WalletSpec, *, source: str,
+                      effective_date=None) -> Wallet
 ```
 
 Open one wallet, valid from `effective_date` (default now). `source` is stored on it; a wallet whose source is not
@@ -114,8 +116,8 @@ as the wallet's `allotment`.
 ### `credit`
 
 ```python
-credit(store, wallet_id, amount, *, guid=None, obj: ObjectRef | None = None,
-       actor: SubjectRef | None = None, at=None) -> Transaction
+async def credit(store, wallet_id, amount, *, guid=None, obj: ObjectRef | None = None,
+                 actor: SubjectRef | None = None, at=None) -> Transaction
 ```
 
 Add a positive `amount` to a wallet's balance, as a `GRANT` transaction recorded with `actor`. `obj` attaches it to
@@ -128,9 +130,9 @@ valid at `at`, `ValueError` for an amount that is not positive.
 ### `transfer`
 
 ```python
-transfer(store, from_wallet_id, to_wallet_id, amount, *, guid=None,
-         obj: ObjectRef | None = None, actor: SubjectRef | None = None,
-         at=None) -> FulfillmentResult
+async def transfer(store, from_wallet_id, to_wallet_id, amount, *, guid=None,
+                   obj: ObjectRef | None = None, actor: SubjectRef | None = None,
+                   at=None) -> FulfillmentResult
 ```
 
 Move a positive `amount` from one wallet to another of the same currency. Writes two `TRANSFER` transactions under one
@@ -152,7 +154,7 @@ Nothing is written when it raises.
 ### `close_wallet`
 
 ```python
-close_wallet(store, wallet_id, *, at=None) -> Wallet
+async def close_wallet(store, wallet_id, *, at=None) -> Wallet
 ```
 
 End a wallet at `at` (default now) — revoke a right, close a budget. A scheduled plan-switch change already due at `at`
@@ -163,7 +165,7 @@ the wallet later. Returns the closed wallet. Raises `WalletNotFoundError` for an
 ### `adjust_wallet`
 
 ```python
-adjust_wallet(store, wallet_id, allotment, *, at=None) -> Wallet
+async def adjust_wallet(store, wallet_id, allotment, *, at=None) -> Wallet
 ```
 
 Give a wallet that has an `allotment` a new one, with `ADJUST` arithmetic: a windowed wallet gets the new per-window
@@ -173,7 +175,7 @@ allotment, a stored balance moves by the difference (booked as a `GRANT` transac
 ### `consumed`
 
 ```python
-consumed(store, wallet_id, since, until) -> Decimal
+async def consumed(store, wallet_id, since, until) -> Decimal
 ```
 
 Net amount drawn from a wallet in `[since, until]`: consumption minus reversals of consumption booked in that interval.
@@ -183,7 +185,7 @@ budget](/guide/credits-and-budgets#postpaid-budget).
 ### `archive_expired_wallets`
 
 ```python
-archive_expired_wallets(store, at=None) -> int
+async def archive_expired_wallets(store, at=None) -> int
 ```
 
 Move wallets whose `valid_until` is at or before `at` into the archive; a wallet is valid until, not including, its
@@ -194,7 +196,7 @@ ignores expired wallets and no other operation archives them.
 ### `find_unattached_fulfillment_records`
 
 ```python
-find_unattached_fulfillment_records(store, older_than=None) -> list[FulfillmentRecord]
+async def find_unattached_fulfillment_records(store, older_than=None) -> list[FulfillmentRecord]
 ```
 
 Records holding a `CONSUMPTION` transaction without an attached object; the operation that consumed it may have failed.
@@ -204,7 +206,7 @@ that instant, which excludes operations still in progress.
 ### `add_member`
 
 ```python
-add_member(store, member: SubjectRef, group: SubjectRef) -> None
+async def add_member(store, member: SubjectRef, group: SubjectRef) -> None
 ```
 
 Make `member` a direct member of `group`. A group is any subject; groups may be members of groups. An existing
@@ -215,7 +217,7 @@ directly or transitively, a member of `member`.
 ### `remove_member`
 
 ```python
-remove_member(store, member: SubjectRef, group: SubjectRef) -> bool
+async def remove_member(store, member: SubjectRef, group: SubjectRef) -> bool
 ```
 
 Remove the direct membership of `member` in `group`. Returns whether it existed. Memberships through other groups are
@@ -224,7 +226,7 @@ unaffected.
 ### `groups_of`
 
 ```python
-groups_of(store, subject: SubjectRef) -> list[SubjectRef]
+async def groups_of(store, subject: SubjectRef) -> list[SubjectRef]
 ```
 
 Every group `subject` belongs to, directly or through other groups: breadth-first, each group once. Direct groups come
@@ -234,7 +236,7 @@ order, each member's groups in creation order. `subject` itself is not included.
 ### `effective_balance`
 
 ```python
-effective_balance(store, wallet, at=None) -> Decimal
+async def effective_balance(store, wallet, at=None) -> Decimal
 ```
 
 The balance that governs decisions. For an ordinary wallet, its stored balance. For a [windowed](/guide/sliding-windows)
@@ -243,8 +245,8 @@ one, the allotment plus every transaction inside the current window.
 ### `effective_allowances`
 
 ```python
-effective_allowances(store, subject: SubjectRef, *, at=None, wallet_types=None,
-                     currencies=None) -> list[Allowance]
+async def effective_allowances(store, subject: SubjectRef, *, at=None, wallet_types=None,
+                               currencies=None) -> list[Allowance]
 ```
 
 What `subject` holds at `at` (default now): every live wallet of the subject and of every group in `groups_of(subject)`,
@@ -392,7 +394,44 @@ lists them.
 The storage port. See [How the port works](/backends/) for the obligations, including the lock order and comparable
 wallet ids, and [Writing a backend](/backends/writing-a-backend) for the full method list.
 
-`allowances.store.Store` is a `runtime_checkable` `Protocol` — there is nothing to inherit.
+`allowances.store.Store` is a `runtime_checkable` `Protocol` — there is nothing to inherit. Every method except
+`unit_of_work` is a coroutine function; `unit_of_work()` returns an asynchronous context manager
+(`async with store.unit_of_work():`). A store whose methods never suspend also serves `allowances.sync`.
+
+## `allowances.sync`
+
+The synchronous API; see [Synchronous API](/guide/synchronous).
+
+Every engine function above, with the same name, signature and docstring, as a plain function that returns what the
+coroutine returns: `add_member`, `adjust_wallet`, `archive_expired_wallets`, `attach`, `cancel_scheduled_switch`,
+`close_wallet`, `consumed`, `credit`, `effective_allowances`, `effective_balance`,
+`find_unattached_fulfillment_records`, `fulfill`, `groups_of`, `open_wallet`, `peek`, `plan_switch`, `remove_member`,
+`transfer`, `unfulfill`. The types, definitions, errors, `Store` and `window_start` are re-exported, the same objects as
+in `allowances`.
+
+The store passed must never suspend; a call that suspends raises `StoreSuspendedError`.
+
+### `unit_of_work`
+
+```python
+with unit_of_work(store): ...
+```
+
+The store's `unit_of_work()` as a synchronous context manager. Every call inside the block runs in its transaction;
+blocks nest with the store's savepoint semantics.
+
+### `allowances.sync.driver`
+
+```python
+run(coroutine) -> T
+synchronous(function, module="allowances.sync") -> Callable
+```
+
+`run` runs a coroutine to completion on the calling thread, without an event loop, and returns its result; an exception
+raised by the coroutine propagates unchanged. A coroutine that suspends is closed and `StoreSuspendedError` is raised.
+`synchronous(function, module)` returns a plain function with the signature and docstring (`functools.wraps`) of the
+coroutine function `function`, whose call runs the coroutine with `run`. Its `__module__` is `module`: a wrapper bound
+under the coroutine function's name in that module is found by `pickle`, so it can be passed to a process pool.
 
 ## Errors
 
@@ -406,6 +445,7 @@ wallet ids, and [Writing a backend](/backends/writing-a-backend) for the full me
 | `UnsuitableWalletError` | The wallet does not accept the operation: `credit` on a windowed wallet or one not valid now, `adjust_wallet` without an allotment, `transfer` between different currencies, from a wallet to itself, or with a wallet not valid now. Also a `ValueError`. |
 | `MembershipCycleError` | `add_member` would make a subject a member of itself, directly or through other groups. |
 | `UnsupportedOperationError` | The backend does not implement this operation. Also a `NotImplementedError`. |
+| `StoreSuspendedError` | A call through `allowances.sync` suspended: the store awaited something that yields to an event loop. Also a `RuntimeError`. `allowances_django.store.DjangoStore` raises it when called without a running event loop. |
 
 ## Windows
 

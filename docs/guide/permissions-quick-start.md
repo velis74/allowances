@@ -95,17 +95,21 @@ from django.contrib.auth.models import Group, User
 from allowances_django.permissions import grant_permission
 from allowances_django.shortcuts import add_member
 
-editors = Group.objects.create(name="editors")
-user = User.objects.get(username="ana")
+editors = await Group.objects.acreate(name="editors")
+user = await User.objects.aget(username="ana")
 
-add_member(user, editors)
-grant_permission(editors, "club.change_member")
+await add_member(user, editors)
+await grant_permission(editors, "club.change_member")
 
-User.objects.get(pk=user.pk).has_perm("club.change_member")   # True
+await (await User.objects.aget(pk=user.pk)).ahas_perm("club.change_member")   # True
 ```
 
 The backend caches a user's permission set on the user object, as `ModelBackend` does. A grant or revocation takes
 effect for the next loaded user object, which each request loads anew.
+
+Synchronous code (a management command, a Celery task) imports `grant_permission` from
+`allowances_django.sync.permissions` and `add_member` from `allowances_django.sync.shortcuts`, with the same arguments
+and without `await`; see [Synchronous API](/guide/synchronous#django).
 
 ## Check it
 
@@ -123,6 +127,12 @@ def edit_member(request, pk):
 
 def member_detail(request, pk):
     can_edit = request.user.has_perm("club.change_member")
+    ...
+
+
+async def member_summary(request, pk):
+    user = await request.auser()
+    can_edit = await user.ahas_perm("club.change_member")   # AllowancesBackend.ahas_perm
     ...
 ```
 
@@ -159,7 +169,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-grant_permission(user, "club.view_report", valid_until=timezone.now() + timedelta(days=30))
+await grant_permission(user, "club.view_report", valid_until=timezone.now() + timedelta(days=30))
 ```
 
 The permission is not held from `valid_until` on; no scheduled job is needed. `valid_from=` starts a grant later.
@@ -169,14 +179,14 @@ The permission is not held from `valid_until` on; no scheduled job is needed. `v
 Groups may be members of groups, to any depth. A department inside an organisation:
 
 ```python
-organisation = Group.objects.create(name="organisation")
-department = Group.objects.create(name="department")
+organisation = await Group.objects.acreate(name="organisation")
+department = await Group.objects.acreate(name="department")
 
-add_member(department, organisation)
-add_member(user, department)
-grant_permission(organisation, "club.view_member")
+await add_member(department, organisation)
+await add_member(user, department)
+await grant_permission(organisation, "club.view_member")
 
-User.objects.get(pk=user.pk).has_perm("club.view_member")   # True, through two levels
+await (await User.objects.aget(pk=user.pk)).ahas_perm("club.view_member")   # True, through two levels
 ```
 
 `add_member` raises `MembershipCycleError` for a membership that would form a cycle. The group need not be an
@@ -191,7 +201,7 @@ ones that are Django permissions and groups them by permission.
 from allowances_django.permissions import effective_permissions
 from allowances_django.shortcuts import effective_allowances
 
-effective_permissions(effective_allowances(user))
+effective_permissions(await effective_allowances(user))
 # {
 #     "club.change_member": [
 #         Allowance(wallet=Wallet(id=7, ...), holder=SubjectRef("auth.group", "1"),
@@ -210,7 +220,7 @@ effective_permissions(effective_allowances(user))
 
 `holder` is the subject whose wallet confers the permission and `depth` how far it is from the user: 0 for the user's
 own grant, 1 for a direct group, 2 for a group of that group. `effective_allowances` takes any subject, not only users —
-`effective_allowances(department)` shows what the department holds. [Effective
+`await effective_allowances(department)` shows what the department holds. [Effective
 permissions](/guide/permissions#effective-permissions) describes the result in full.
 
 ## Record each use
@@ -226,20 +236,21 @@ from allowances_django.permissions import permission_feature
 from allowances_django.shortcuts import attach, fulfill, unfulfill
 
 
-def update_member(request, member):
+async def update_member(request, member):
+    user = await request.auser()
     try:
-        result = fulfill(permission_feature("club.change_member"), 1, {"user": request.user})
+        result = await fulfill(permission_feature("club.change_member"), 1, {"user": user})
     except InsufficientBalanceError:
         raise PermissionDenied
     try:
-        member.save()
+        await member.asave()
     except Exception:
-        unfulfill(result.guid)
+        await unfulfill(result.guid)
         raise
-    attach(result.guid, member)
+    await attach(result.guid, member)
 ```
 
-The entry goes on the wallet that holds the right — the `editors` group's — with `request.user` as its actor,
+The entry goes on the wallet that holds the right — the `editors` group's — with the user as its actor,
 at amount 0. `fulfill` resolves the user and its groups like the backend, but does not apply the superuser rule.
 See [The actor](/guide/permissions#the-actor).
 
@@ -249,8 +260,8 @@ See [The actor](/guide/permissions#the-actor).
 from allowances_django.permissions import revoke_permission
 from allowances_django.shortcuts import remove_member
 
-revoke_permission(editors, "club.change_member")   # 1: the number of wallets closed
-remove_member(user, department)                    # True
+await revoke_permission(editors, "club.change_member")   # 1: the number of wallets closed
+await remove_member(user, department)                    # True
 ```
 
 Every member of `editors` loses the permission at once, unless it holds it another way. `remove_member` removes one

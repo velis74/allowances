@@ -19,18 +19,99 @@ model instances as subjects:
 ```python
 from allowances_django.shortcuts import fulfill
 
+await fulfill("send_email", 1, {"user": user, "team": team})
+```
+
+Synchronous code (a synchronous view, a Celery task, a management command) uses the same functions from
+`allowances_django.sync.shortcuts`, without `await`:
+
+```python
+from allowances_django.sync.shortcuts import fulfill
+
 fulfill("send_email", 1, {"user": request.user, "team": team})
 ```
 
-Use `DjangoStore` directly for a second database or a custom provider:
+Use a store directly for a second database or a custom provider:
 
 ```python
-from allowances.engine import fulfill
+from allowances import fulfill
 from allowances_django.store import DjangoStore
 from allowances_django.subjects import subject_refs
 
-fulfill(DjangoStore(using="billing"), "send_email", 1, subject_refs({"user": user}), provider)
+await fulfill(DjangoStore(using="billing"), "send_email", 1, subject_refs({"user": user}), provider)
 ```
+
+## Two stores
+
+The package has two stores over the same models. Both run the same ORM queries
+(`allowances_django.queries.DjangoQueries`); they differ in where those queries run.
+
+| | `allowances_django.store.DjangoStore` | `allowances_django.sync.store.DjangoStore` |
+| --- | --- | --- |
+| For | the asynchronous API: `allowances`, `allowances_django.shortcuts` | the synchronous API: `allowances.sync`, `allowances_django.sync.shortcuts` |
+| Queries run | on threads, never on the event loop | on the calling thread |
+| `unit_of_work()` | `transaction.atomic()` on a thread of its own | `transaction.atomic()` on the calling thread |
+| Needs | a running event loop | a thread without a running event loop |
+| Default of | `ALLOWANCES_STORE` | `ALLOWANCES_SYNC_STORE` |
+
+Both take `using=` (a database alias, default `None`: the default database) and have two methods besides the port,
+used by the shortcuts: `resolve(ref)` (the model instance behind a reference, or `None`) and
+`live_wallet_ids(subject=, wallet_type=, currency=, at=)`.
+
+### The asynchronous store
+
+Django has no asynchronous `transaction.atomic` or `select_for_update`, and a Django connection belongs to one thread.
+`allowances_django.store.DjangoStore` therefore runs its queries on threads:
+
+- **Outside a unit of work** a call runs as Django's own asynchronous ORM methods (`aget`, `afirst`, ...) do: through
+  `sync_to_async` on Django's thread-sensitive executor, in autocommit.
+- **Inside a unit of work** everything runs on one thread. The outermost `async with store.unit_of_work():` starts a
+  thread of its own and enters `atomic()` on it. Every store call made inside the block runs on that thread: calls
+  through any `DjangoStore` instance, nested blocks (savepoints) and the engine's own blocks. When the block ends,
+  `atomic()` is exited on the thread, the thread's connections are closed and the thread ends.
+
+Concurrent units of work in one process run on separate threads, with separate connections and transactions; they
+never share a connection or an atomic block.
+
+Tasks created inside a unit of work (`asyncio.gather`, `asyncio.create_task`) inherit it and share its transaction. A
+nested block opened by such a task is a savepoint; nested blocks of different tasks run one after another, and while one
+is open, store calls and blocks of other tasks wait until it ends. A failing nested block rolls back only its own
+writes. A nested block that awaits a task whose store calls belong to the enclosing block never ends.
+
+Each unit of work opens a database connection, so a connection pool (the `"pool"` option of Django's PostgreSQL backend
+on psycopg 3) keeps it cheap.
+
+Writes are as parallel as threads allow; the store does no asynchronous I/O. For asynchronous I/O on PostgreSQL use the
+[adorm store](/backends/adorm).
+
+A call made without a running event loop raises `StoreSuspendedError`: `allowances.sync` cannot drive this store.
+
+### The synchronous store
+
+`allowances_django.sync.store.DjangoStore` implements the port with coroutines whose bodies call the ORM directly and
+never suspend, so `allowances.sync` runs the engine with it without an event loop (see
+[Synchronous API](/guide/synchronous)). Its `unit_of_work()` enters and exits `transaction.atomic()` on the calling
+thread, so a synchronous caller's own `with transaction.atomic():` block contains it.
+
+Django refuses synchronous ORM calls on a thread that runs an event loop. Asynchronous code uses the asynchronous store,
+or runs the synchronous API in a worker thread (`await asyncio.to_thread(...)`).
+
+### Choosing the stores
+
+```python
+# settings.py (the defaults)
+ALLOWANCES_STORE = "allowances_django.store.DjangoStore"
+ALLOWANCES_SYNC_STORE = "allowances_django.sync.store.DjangoStore"
+```
+
+`ALLOWANCES_STORE` is the store of `allowances_django.shortcuts`, `allowances_django.permissions` and the asynchronous
+checks of `AllowancesBackend`; `ALLOWANCES_SYNC_STORE` that of `allowances_django.sync.shortcuts`,
+`allowances_django.sync.permissions` and the synchronous checks. Each is a dotted path to a callable or a callable,
+called with no arguments for every call without a `store=` argument; `store=` wins. The synchronous store must never
+suspend.
+
+Besides the port, the shortcuts call two store methods: `groups_of` calls `resolve(ref)` and `revoke_permission` calls
+`live_wallet_ids(...)`. A store without them serves every other shortcut.
 
 ## Tables
 
@@ -65,20 +146,24 @@ the object when it is needed:
 
 ```python
 from allowances.types import SubjectRef
+from allowances_django.shortcuts import get_store
 from allowances_django.subjects import resolve
 
-resolve(SubjectRef(wallet.subject_type, wallet.subject_id))  # instance, or None if deleted
+ref = SubjectRef(wallet.subject_type, wallet.subject_id)
+await get_store().resolve(ref)   # instance, or None if deleted
+resolve(ref)                     # the same, in synchronous code
 ```
 
 `resolve` returns `None` instead of raising, so an admin page can render an orphaned row.
 
 ## Concurrency
 
-`unit_of_work()` is `transaction.atomic()` and nests; a nested block that raises rolls back to its savepoint.
-`lock=True` and `lock_wallets` are `select_for_update()` where the database has it; `lock_wallets` orders by `id`, so
-PostgreSQL takes the row locks in ascending id order. A locked `get_record` is `FOR NO KEY UPDATE` on PostgreSQL: it
-serialises operations on one record, but does not block the foreign-key check of a wallet's archival, which inserts
-archive rows referencing the record while holding that wallet's lock.
+`unit_of_work()` is `transaction.atomic()` (on the unit of work's thread, for the asynchronous store) and nests; a
+nested block that raises rolls back to its savepoint. `lock=True` and `lock_wallets` are `select_for_update()` where the
+database has it; `lock_wallets` orders by `id`, so PostgreSQL takes the row locks in ascending id order. A locked
+`get_record` is `FOR NO KEY UPDATE` on PostgreSQL: it serialises operations on one record, but does not block the
+foreign-key check of a wallet's archival, which inserts archive rows referencing the record while holding that wallet's
+lock.
 
 `fulfill` locks every candidate wallet for the duration of the call, so two simultaneous calls against the same wallet
 are serialised and cannot both spend the same balance. Every operation that locks wallets locks all of them in that one
@@ -170,5 +255,7 @@ DjangoStore(using="billing")
 Every query the store issues is routed to that alias. Pass it through the shortcuts with `store=`:
 
 ```python
-fulfill("send_email", 1, subjects, store=DjangoStore(using="billing"))
+await fulfill("send_email", 1, subjects, store=DjangoStore(using="billing"))
 ```
+
+`allowances_django.sync.store.DjangoStore(using="billing")` does the same for the synchronous shortcuts.

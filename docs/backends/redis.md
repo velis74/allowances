@@ -47,4 +47,6 @@ scan methods. Billable entitlements stay in PostgreSQL: two stores, chosen per f
 - Persist with AOF `appendfsync always` if the ledger is kept; it lowers write throughput.
 - Raise `UnsupportedOperationError` from methods without an index instead of returning an empty list. An empty list
   cannot be told apart from "nothing to report".
+- A store on `redis.asyncio` suspends and serves only the asynchronous API; one on the synchronous `redis` client that
+  awaits nothing serves [`allowances.sync`](/guide/synchronous) as well.
 - Run [the library's engine test suite](/backends/writing-a-backend#testing-a-backend) against it.

@@ -82,6 +82,9 @@ the [store](/backends/).
 
 The engine does not depend on either layer's storage; it runs unchanged on Postgres, SQLite or `MemoryStore`.
 
+Every engine function and every store method is a coroutine. Synchronous code calls the same functions from
+`allowances.sync`; see [Synchronous API](/guide/synchronous).
+
 ## Where to go next
 
 - [Getting started](/guide/getting-started) — install it and make one fulfilment call.

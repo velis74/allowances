@@ -7,7 +7,7 @@
 ```python
 from allowances_django.shortcuts import plan_switch
 
-plan_switch(
+await plan_switch(
     {"user": user},
     [
         WalletSpec(WalletType.CONSUMABLE, "email_send", Decimal("2000")),
@@ -31,7 +31,7 @@ keeps its balance and validity through every plan change.
 **A future `effective_date` schedules the switch:**
 
 ```python
-plan_switch({"user": user}, specs, effective_date=next_billing_date)
+await plan_switch({"user": user}, specs, effective_date=next_billing_date)
 ```
 
 The old wallets stay valid until then, the new ones are not visible before it, and a kept wallet's
@@ -39,7 +39,7 @@ The old wallets stay valid until then, the new ones are not visible before it, a
 end of a paid period is a scheduled switch; a cancellation is a switch to an empty plan:
 
 ```python
-plan_switch({"user": user}, [], effective_date=period_end)
+await plan_switch({"user": user}, [], effective_date=period_end)
 ```
 
 **A scheduled switch can be cancelled** until it takes effect:
@@ -47,7 +47,7 @@ plan_switch({"user": user}, [], effective_date=period_end)
 ```python
 from allowances_django.shortcuts import cancel_scheduled_switch
 
-cancel_scheduled_switch({"user": user})   # returns how many subjects had one
+await cancel_scheduled_switch({"user": user})   # returns how many subjects had one
 ```
 
 Wallets it would have closed get their previous `valid_until` back, adjustments it scheduled are dropped, and wallets
@@ -74,7 +74,7 @@ Each `WalletSpec` sets with `on_switch` what happens to an existing plan wallet:
 ```python
 from allowances import SwitchPolicy
 
-plan_switch({"user": user}, [
+await plan_switch({"user": user}, [
     WalletSpec(WalletType.CONSUMABLE, "storage_gb", Decimal("100"), on_switch=SwitchPolicy.ADJUST),
     WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("3000"), on_switch=SwitchPolicy.TOP_UP),
     WalletSpec(WalletType.GRANT, "api_access", Decimal("1")),
@@ -126,10 +126,12 @@ An expired wallet is not drawn from and is not archived by the drain rule. `arch
 ```python
 from allowances_django.shortcuts import archive_expired_wallets
 
-archive_expired_wallets()   # returns how many were archived
+await archive_expired_wallets()   # returns how many were archived
 ```
 
-Run it periodically: a Celery beat task, a cron job, a management command. Running it repeatedly is safe.
+Run it periodically: a Celery beat task, a cron job, a management command. Running it repeatedly is safe. A Celery task
+or a management command is synchronous and imports it from
+[`allowances_django.sync.shortcuts`](/guide/synchronous#django).
 
 Closed wallets left by `plan_switch` stay in live storage until it runs.
 
