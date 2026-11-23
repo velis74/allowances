@@ -79,8 +79,9 @@ persists `allotment` and `scheduled` along with `balance`, `first_overdraft_at`,
 `find_scheduled_wallets` returns a subject's wallets whose `scheduled` is set, whatever their validity. `find_wallets`
 takes `currencies=None` to mean every currency.
 
-**The store filters by validity.** `find_wallets` returns only wallets valid at `at`: `valid_from` null or past,
-`valid_until` null or future. The engine does not re-check.
+**The store filters by validity.** `find_wallets` returns only wallets valid at `at`: `valid_from` null or not after
+`at`, `valid_until` null or not before `at`. The engine does not re-check. `find_expired_wallets` returns wallets whose
+`valid_until` is before `at`, so a wallet is never both valid and expired.
 
 **`storno_of` must be unique.** A transaction may be reversed at most once. The constraint belongs in storage, not
 in application code: a check in application code lets two concurrent reversals of one transaction both succeed and
@@ -103,8 +104,8 @@ windows and backfills depend on it. It also takes `actor`, a `SubjectRef` or `No
 **Memberships are direct pairs.** `add_membership` stores `(member, group)` at most once; `remove_membership` returns
 whether the pair existed; `memberships_of(members=...)` returns the direct pairs whose member is any of `members`,
 oldest first. The engine computes transitive groups and rejects cycles itself. `lock_memberships()` serialises
-membership changes for the rest of the current unit of work: an advisory or table lock, or nothing when `unit_of_work`
-already serialises every writer.
+membership changes for the rest of the current unit of work on every database the backend supports: a row or table
+lock, or nothing when `unit_of_work` already serialises every writer.
 
 ## Unsupported operations
 

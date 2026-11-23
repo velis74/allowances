@@ -34,7 +34,7 @@ fulfill(DjangoStore(using="billing"), "send_email", 1, subject_refs({"user": use
 
 ## Tables
 
-Seven, all prefixed `allowances_` (the app label is `allowances`, not `allowances_django`):
+Eight, all prefixed `allowances_` (the app label is `allowances`, not `allowances_django`):
 
 | Table | Holds |
 | --- | --- |
@@ -45,6 +45,7 @@ Seven, all prefixed `allowances_` (the app label is `allowances`, not `allowance
 | `allowances_membership` | Direct memberships of subjects in groups |
 | `allowances_walletarchive` | Spent-out and expired wallets |
 | `allowances_transactionarchive` | Their entries |
+| `allowances_allowanceslock` | Named rows locked to serialise membership changes |
 
 ## Why there is no ContentType
 
@@ -88,9 +89,14 @@ locking only the transaction rows would let two concurrent reversals read the sa
 them before the wallets would invert the order a wallet's archival takes when it deletes them. The unique constraint
 on `storno_of` additionally rejects a second storno of the same transaction.
 
-`lock_memberships` takes `pg_advisory_xact_lock(MEMBERSHIP_LOCK_KEY)` on PostgreSQL, held until the transaction ends,
-so two concurrent `add_member` calls cannot each pass the cycle check and together form a cycle. On SQLite it takes
-nothing: the `IMMEDIATE` write lock serialises them. Other databases take no lock.
+`lock_memberships` locks the `AllowancesLock` row `"membership"` with `SELECT ... FOR UPDATE`, held until the
+transaction ends, so two concurrent `add_member` calls cannot each pass the cycle check and together form a cycle.
+Migration `0004_allowanceslock` creates the row. A missing row (an emptied table, a restored dump) is created in the
+caller's transaction and locked. When two transactions create it at once, the second waits for the first; under
+REPEATABLE READ or SERIALIZABLE the row the first created is not visible to the second, which then raises
+`django.db.OperationalError`, and retrying the operation succeeds. On MySQL the same race can end in a deadlock error,
+also resolved by a retry. On SQLite, which has no `FOR UPDATE`, the `IMMEDIATE` write lock serialises
+them and no row is used.
 
 ## SQLite
 
@@ -140,8 +146,16 @@ at a given instant. `at=` therefore sets the stored timestamp, e.g. for testing 
 
 ## Admin
 
-All seven models are registered. Wallets and modifiers are editable; transactions, memberships and archives are
-read-only. Memberships change through `add_member` and `remove_member`, which reject cycles.
+The seven ledger models are registered; `AllowancesLock` is not. Wallets, fulfilment records and modifiers are editable;
+transactions, memberships and archives cannot be added or changed, only deleted. Memberships change through
+`add_member` and `remove_member`, which reject cycles.
+
+```python
+ALLOWANCES_ADMIN_READ_ONLY = True
+```
+
+makes every allowances model view-only: no add, change or delete, for superusers too. Viewing still needs Django's
+view or change permission. The setting is read on every request; the default is `False`.
 
 After a wallet is opened, the engine changes its balance only through operations that write ledger entries
 (`fulfill`, `unfulfill`, `credit`, `transfer`, `adjust_wallet`, a `plan_switch` adjustment). Editing a balance in the

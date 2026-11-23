@@ -93,9 +93,11 @@ DjangoStore(using: str | None = None)
 A [Store](/backends/) over the ORM. `using` routes every query to that database alias. It holds no connection, only a
 cache mapping fulfilment record guids to primary keys.
 
-`lock_wallets` is `select_for_update()` ordered by `id` where the database has it. `lock_memberships` takes the
-PostgreSQL transaction-level advisory lock `MEMBERSHIP_LOCK_KEY` (`allowances_django.store.MEMBERSHIP_LOCK_KEY`) and
-does nothing on other databases. See [Concurrency](/backends/django#concurrency).
+`lock_wallets` is `select_for_update()` ordered by `id` where the database has it. `lock_memberships` locks the
+`AllowancesLock` row `MEMBERSHIP_LOCK_NAME` (`"membership"`) with `select_for_update()`. A missing row is created in
+the current transaction; when a concurrent transaction created it and the isolation level hides it (REPEATABLE READ,
+SERIALIZABLE), `lock_memberships` raises `django.db.OperationalError` and a retry succeeds. See
+[Concurrency](/backends/django#concurrency).
 
 Row-to-value converters, for reports written against the models:
 
@@ -225,6 +227,11 @@ Spent-out and expired wallets and their transactions. Archival deletes the live 
 it; `original_wallet_id` is a plain reference. `TransactionArchive.storno_of` points at archived copies, rebuilt during
 archival. `TransactionArchive` keeps `actor_type` and `actor_id`.
 
+### `AllowancesLock`
+
+`name` (primary key). A row that `DjangoStore` locks with `select_for_update()` to serialise one kind of change; the row
+`"membership"` serialises membership changes. The store creates a missing row. It holds no data.
+
 ## Settings
 
 ```python
@@ -237,7 +244,19 @@ ALLOWANCES = {
 The full shape is in [Concepts](/guide/concepts). Absent, `SettingsProvider` reads an empty config and every lookup
 raises `DefinitionNotFoundError`.
 
+```python
+ALLOWANCES_ADMIN_READ_ONLY = False
+```
+
+`True` makes every allowances model view-only in the [admin](#admin).
+
 ## Admin
 
-All seven models are registered. Wallets and modifiers are editable; transactions, memberships and archives are
-read-only ([why](/backends/django#admin)). The transaction list shows and searches the actor.
+The seven ledger models are registered. Wallets, fulfilment records and modifiers are editable; transactions,
+memberships and archives cannot be added or changed, only deleted ([why](/backends/django#admin)). The transaction list
+shows and searches the actor.
+
+With `ALLOWANCES_ADMIN_READ_ONLY = True` every allowances `ModelAdmin` returns `False` from `has_add_permission`,
+`has_change_permission` and `has_delete_permission`; `has_view_permission` follows Django's view permission. The setting
+is read on every call, so `override_settings` applies. The classes derive from
+`allowances_django.admin.AllowancesModelAdmin`.

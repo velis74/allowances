@@ -9,7 +9,17 @@ python manage.py migrate allowances
 ```
 
 `0003_actor_transfer_membership` adds `actor_type` and `actor_id` to `Transaction` and `TransactionArchive` (empty on
-existing rows) and creates the `Membership` table.
+existing rows) and creates the `Membership` table. `0004_allowanceslock` creates the `AllowancesLock` table.
+
+### Several modifiers: the smallest factor applies
+
+Where several [modifiers](/guide/concepts#modifier) apply to one request, the smallest factor is used. A request that
+had both a discount (factor below 1) and a larger factor now costs the discounted amount.
+
+### Expiry: a wallet is valid at its `valid_until`
+
+`find_expired_wallets` and `archive_expired_wallets` treat a wallet as expired only after its `valid_until`. A custom
+backend's `find_expired_wallets` returns wallets whose `valid_until` is before `at`.
 
 ### Custom backends
 

@@ -28,6 +28,12 @@ Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgradi
 - Django: `Membership` model, `actor_type` / `actor_id` on `Transaction` and `TransactionArchive`,
   migration `0003_actor_transfer_membership`. The admin lists memberships and shows the actor of
   every transaction.
+- Django: `AllowancesLock` model, migration `0004_allowanceslock`. `DjangoStore.lock_memberships`
+  locks its row `"membership"` with `SELECT ... FOR UPDATE`, which serialises membership changes on
+  every database with row locks; SQLite's `IMMEDIATE` transactions serialise them there. Migration
+  0004 creates the row; a missing row is created on demand.
+- Django setting `ALLOWANCES_ADMIN_READ_ONLY` (default `False`): when true, every allowances model is
+  view-only in the admin.
 - Store port methods `lock_wallets`, `add_membership`, `remove_membership`, `memberships_of`,
   `lock_memberships`; `create_transaction` takes `actor=`.
 - `effective_allowances()` and `Allowance`: every live wallet of a subject and of its groups, of any
@@ -59,6 +65,11 @@ Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgradi
 ### Fixed
 
 - A grant wallet with a conversion rate of 0 never satisfied `peek` or `fulfill`.
+- Where several modifiers apply, the smallest factor is used, the one most favourable to the
+  subject; the largest was used.
+- A wallet whose `valid_until` equals `at` is valid at `at` and is not expired:
+  `find_expired_wallets` returns wallets with `valid_until` before `at`, and `archive_expired_wallets`
+  no longer archives a wallet at the instant fulfilment can still draw from it.
 - Concurrent `fulfill` calls whose fulfillment orders walk the same wallets in different orders, and
   `fulfill` against `unfulfill`, could deadlock on PostgreSQL: wallets were locked step by step in walk
   or transaction order.
