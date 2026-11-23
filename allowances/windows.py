@@ -1,19 +1,23 @@
 """
 Sliding-window and calendar-reset arithmetic.
 
-A wallet with a ``reset_config`` doesn't get topped up by a background job — nothing ever writes
-to it on a schedule. Instead its stored ``balance`` is a constant per-window allotment, and the
-balance that governs decisions is that allotment plus every transaction inside the current window.
-Old consumption ages out of the window on its own, which is what makes the quota appear to reset.
+A wallet with a ``reset_config`` is not refilled by a scheduled job. Its stored ``balance`` is the
+per-window allotment; its effective balance is the allotment plus the sum of transactions inside the
+current window. Transactions before the window start do not count.
 
-All arithmetic happens in UTC. The four supported shapes:
+All arithmetic is in UTC. The supported shapes:
 
-===================================================  ==========================================
-``{"day_of_month": 1-31, "time": "HH:MM:SS"}``       monthly, clamped to the last real day
+===================================================  ==============================================
+``{"day_of_month": 1-31, "time": "HH:MM:SS"}``       monthly; a day past the month's end means its
+                                                     last day
 ``{"day_of_week": 0-6, "time": "HH:MM:SS"}``         weekly, 0 = Monday (``date.weekday()``)
 ``{"time": "HH:MM:SS"}``                             daily
 ``{"window_seconds": <int>}``                        rolling window, no calendar anchor
-===================================================  ==========================================
+===================================================  ==============================================
+
+``time`` may be ``HH``, ``HH:MM`` or ``HH:MM:SS``; it is optional for monthly and weekly configs
+(default ``00:00:00``). A config with none of these keys is a rolling window of
+``DEFAULT_WINDOW_SECONDS`` (86400 s).
 """
 
 from __future__ import annotations
@@ -26,12 +30,12 @@ DEFAULT_WINDOW_SECONDS = 86400
 
 
 def utcnow() -> datetime:
-    """The core's clock. Timezone-aware, always UTC."""
+    """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(dt_timezone.utc)
 
 
 def as_utc(at: datetime) -> datetime:
-    """Naive datetimes are assumed to already be UTC rather than rejected."""
+    """Convert ``at`` to UTC; a naive datetime is taken as UTC."""
     if at.tzinfo is None:
         return at.replace(tzinfo=dt_timezone.utc)
     return at.astimezone(dt_timezone.utc)
@@ -43,12 +47,12 @@ def _parse_time_of_day(value: str) -> tuple[int, int, int]:
 
 
 def _last_day_clamped(year: int, month: int, day: int) -> int:
-    """``day_of_month: 31`` in February means the 28th (or 29th), not an error."""
+    """Clamp ``day`` to the length of the month (31 in February gives 28 or 29)."""
     return min(day, calendar.monthrange(year, month)[1])
 
 
 def window_start(reset_config: dict, at: datetime) -> datetime:
-    """The instant the window containing ``at`` began."""
+    """Return the start of the window that contains ``at``."""
     at = as_utc(at)
 
     if "day_of_month" in reset_config:

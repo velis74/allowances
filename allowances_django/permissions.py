@@ -56,8 +56,9 @@ class PermissionProvider(DefinitionProvider):
     serves a definition for every ``perm:`` feature or currency that ``base`` does not define.
 
     A served feature has one grant section accepting its own currency at rate 0 and the
-    fulfillment order ``[("grant", None)]``, so a wallet of any supplied subject or its groups
-    holds the right. A served currency has no conversion and default rounding.
+    fulfilment order ``[("grant", None, None)]`` (any subject, any source), so a wallet of any
+    supplied subject or its groups holds the right. A served currency has no conversion and default
+    rounding.
     """
 
     def __init__(self, base: DefinitionProvider | None = None):

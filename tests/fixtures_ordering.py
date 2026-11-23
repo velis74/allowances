@@ -1,13 +1,10 @@
 """
-A custom ``fulfillment_order`` callable, kept as a real importable module because the dotted-string
-form has to resolve to something.
+A custom ``fulfillment_order`` callable in an importable module, for tests of the dotted-string form.
 
-Note the signature: it receives a plain ``list[Wallet]``, not a database query. That is what makes
-a custom ordering portable — the same function works whether the wallets came out of Postgres or a
-dict.
+The callable receives a ``list[Wallet]``, not a database query, so it works with every store.
 """
 
 
 def order_wallets(wallets):
-    """Drain the fattest wallet first."""
+    """Order wallets by balance descending, then by id."""
     return sorted(wallets, key=lambda w: (-w.balance, w.id))

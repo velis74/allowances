@@ -20,8 +20,8 @@ Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgradi
 - Membership: `add_member()`, `remove_member()`, `groups_of()`. Groups are ordinary subjects and may
   be nested; a membership that would form a cycle raises `MembershipCycleError`. `peek` and `fulfill`
   expand every subject with its groups under the same key.
-- Django: `allowances_django.permissions` with `AllowancesBackend` (a grant-only authentication
-  backend answering `has_perm` from grant wallets of the user and its groups), `PermissionProvider`,
+- Django: `allowances_django.permissions` with `AllowancesBackend` (an authentication backend that
+  authenticates nobody and answers `has_perm` from grant wallets of the user and its groups), `PermissionProvider`,
   `grant_permission()`, `revoke_permission()` and `permission_feature()`.
 - Django shortcuts `transfer`, `close_wallet`, `add_member`, `remove_member`, `groups_of`; `actor=` on
   `fulfill`, `unfulfill` and `credit`.

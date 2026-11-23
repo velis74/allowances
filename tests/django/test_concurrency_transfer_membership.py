@@ -1,5 +1,5 @@
 """
-Concurrent transfers, transfers and reversals alongside fulfillment, and concurrent membership
+Concurrent transfers, transfers and reversals alongside fulfilment, and concurrent membership
 changes: no deadlock, exact balances, and no membership cycle stored.
 """
 
@@ -105,7 +105,7 @@ def test_fulfill_and_transfer_over_the_same_wallets_do_not_deadlock():
 
 
 def test_unfulfill_and_fulfill_over_the_same_wallets_do_not_deadlock():
-    """Reversals lock the record, then both wallets; fulfillment walks them user first."""
+    """Reversals and fulfilments over the same user and team wallets run concurrently without deadlock."""
     provider = provider_with(
         features={
             "user_first": {

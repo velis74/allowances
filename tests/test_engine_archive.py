@@ -1,4 +1,4 @@
-"""Archival: wallets leave live storage once they can no longer pay for anything."""
+"""Archival: wallets move out of live storage once they can no longer fund a request."""
 
 from datetime import timedelta
 from decimal import Decimal
@@ -82,8 +82,7 @@ def test_archiving_carries_the_whole_transaction_history_along(store, alice, pro
     from allowances.engine import unfulfill
 
     now = utcnow()
-    # Balance stays positive throughout, so the drained trigger never fires — this wallet only
-    # leaves live storage because it is expired below.
+    # Positive balance: archived only by expiry.
     wallet = open_wallet(store, alice, balance="10")
     result = fulfill(store, "send_email", 3, {"device": alice}, provider)
     unfulfill(store, result.guid)

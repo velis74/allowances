@@ -1,20 +1,18 @@
 """
 Relational storage for the ``allowances`` core.
 
-These models are a persistence detail, not the library's vocabulary — the engine never imports
-them and never sees an instance. ``allowances_django.store.DjangoStore`` converts rows into the
-core's frozen value types on the way out and back on the way in.
+The engine does not import these models. ``allowances_django.store.DjangoStore`` converts rows to
+the core's frozen value types and back.
 
 **Subjects are stored as two plain strings, not a GenericForeignKey.** ``subject_type`` holds
-``"app_label.modelname"`` and ``subject_id`` the primary key as text. This buys three things a
-``ContentType`` FK cannot: the core stays free of Django, subjects with UUID or slug primary keys
-work (a ``PositiveBigIntegerField`` object id rules those out), and a schema-per-tenant deployment
-stops fighting the shared ``django_content_type`` table — a real FK from a per-tenant table to it
-is legal to create but breaks ``TRUNCATE`` once a second schema exists, which is why the old schema
-had to carry ``db_constraint=False`` everywhere.
+``"app_label.modelname"`` and ``subject_id`` the primary key as text. Unlike a ``ContentType`` FK,
+this keeps the core free of Django, allows UUID and slug primary keys (a ``PositiveBigIntegerField``
+object id does not), and needs no FK to the shared ``django_content_type`` table: in a
+schema-per-tenant deployment such an FK from a per-tenant table breaks ``TRUNCATE`` once a second
+schema exists.
 
-The cost is that ``select_related`` cannot follow a subject and a dangling reference is not caught
-by the database. ``allowances_django.subjects.resolve()`` fetches the object when you need it.
+``select_related`` cannot follow a subject, and the database does not detect a dangling reference.
+``allowances_django.subjects.resolve()`` fetches the object.
 """
 
 from __future__ import annotations
@@ -24,13 +22,11 @@ import uuid
 from django.db import models
 from django.utils import timezone
 
-# Ledger amounts are Decimal throughout. 20 digits with 6 decimal places covers fractional
-# consumables (0.5 credits) and large balances without ever reaching for a float.
+# Ledger amounts: Decimal, 20 digits with 6 decimal places (fractional consumables such as 0.5 credits).
 AMOUNT_MAX_DIGITS = 20
 AMOUNT_DECIMAL_PLACES = 6
 
-# A modifier's factor is a multiplier (0.5, 3.27), not a currency amount, so it gets its own,
-# smaller precision.
+# A modifier's factor is a multiplier (0.5, 3.27), not a currency amount: smaller precision.
 FACTOR_MAX_DIGITS = 10
 FACTOR_DECIMAL_PLACES = 6
 
@@ -72,7 +68,7 @@ class Wallet(SubjectFields):
     A subject's holding of one currency.
 
     For a wallet with a ``reset_config``, ``balance`` is the per-window allotment and never moves;
-    the balance that governs decisions is computed from the transactions inside the current window.
+    the effective balance is computed from the transactions inside the current window.
     """
 
     wallet_type = models.CharField(max_length=16, choices=WalletType.choices)
@@ -124,7 +120,7 @@ class Wallet(SubjectFields):
         blank=True,
         help_text="What a plan switch with a future effective date changes on this wallet. Written by the engine.",
     )
-    # Not auto_now_add: the store sets it, so a backfill or a test can place a wallet in the past.
+    # A default rather than auto_now_add, so a backfill or a test can set a past value.
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -134,7 +130,7 @@ class Wallet(SubjectFields):
             models.Index(fields=["currency"]),
             models.Index(fields=["wallet_type"]),
             models.Index(fields=["valid_from", "valid_until"]),
-            # Candidate lookups always filter on this whole combination, then order by created_at.
+            # Wallet lookup by subject, wallet type and currency.
             models.Index(fields=["subject_type", "subject_id", "wallet_type", "currency"]),
         ]
 
@@ -158,10 +154,10 @@ class Transaction(models.Model):
     One signed ledger entry: negative for a consumption or the source side of a transfer, positive
     for a grant, a storno or the target side of a transfer, zero for the use of a right.
 
-    ``object_type``/``object_id`` of a consumption are written in a second step. The transaction is
-    created when the quota is consumed; the domain object it paid for is attached once that
-    operation actually succeeds. A consumption left unattached is therefore a usable signal that
-    something failed in between.
+    ``object_type``/``object_id`` of a consumption are written in a second step: the transaction is
+    created when the quota is consumed, and the domain object it paid for is attached when that
+    operation succeeds. A consumption without an object means the operation did not complete;
+    ``find_unattached_fulfillment_records`` returns its record.
 
     ``actor_type``/``actor_id`` name the subject on whose behalf the entry was made, or are empty.
     """
@@ -208,7 +204,7 @@ class Transaction(models.Model):
             models.Index(fields=["record"]),
             models.Index(fields=["object_type", "object_id"]),
             models.Index(fields=["kind"]),
-            # Sliding-window balances sum a wallet's entries over a time range on every fulfillment.
+            # Sliding-window balances sum a wallet's entries over a time range.
             models.Index(fields=["wallet", "created_at"]),
         ]
         constraints = [
@@ -245,12 +241,10 @@ class LicenseModifier(SubjectFields):
 
 class WalletArchive(SubjectFields):
     """
-    A wallet that has been spent out or has expired, moved here so the live tables only hold
-    wallets that can still pay for something.
+    A wallet moved out of the live table after it expired or was drawn to zero or below.
 
-    Deliberately not a foreign key back to :class:`Wallet` — the live row is gone by the time this
-    one exists, so a real FK would either dangle or force cascade bookkeeping that defeats the
-    point. ``original_wallet_id`` is a plain reference, the way an audit table's is.
+    ``original_wallet_id`` is a plain integer, not a foreign key: the live wallet row is deleted
+    when this row is created.
     """
 
     original_wallet_id = models.BigIntegerField()
@@ -284,8 +278,8 @@ class WalletArchive(SubjectFields):
 
 class TransactionArchive(models.Model):
     """
-    An archived transaction, moved out alongside its wallet. ``original_wallet_id`` is kept as well
-    as the archive FK, so the link survives even if a transaction is archived without its wallet.
+    An archived transaction, moved out with its wallet. ``original_wallet_id`` holds the wallet's id
+    from the live table.
     """
 
     original_transaction_id = models.BigIntegerField()

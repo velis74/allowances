@@ -1,9 +1,8 @@
 """
 The Django ORM implementation of :class:`allowances.store.Store`.
 
-All of this library's coupling to Django lives here and in ``models.py``. Everything above it —
-the ordering walk, the overdraft passes, the rounding, the window arithmetic — runs unchanged
-against any other backend.
+The engine (fulfilment order, overdraft, rounding, window arithmetic) does not depend on this
+module and works with any ``Store`` implementation.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ MEMBERSHIP_LOCK_KEY = 0x616C6C6F77616E63
 
 
 def _validity_q(at: datetime) -> Q:
-    """Valid means: started (or never had a start) and not yet finished (or never ends)."""
+    """Rows valid at ``at``: ``valid_from`` empty or not after it, ``valid_until`` empty or not before it."""
     return (Q(valid_from__isnull=True) | Q(valid_from__lte=at)) & (Q(valid_until__isnull=True) | Q(valid_until__gte=at))
 
 
@@ -68,19 +67,12 @@ def _wallet_pks(wallet_ids) -> list:
 
 def _locked(qs):
     """
-    Take the strongest lock the connection offers on the rows this queryset selects.
+    Lock the selected rows with ``SELECT ... FOR UPDATE`` where the backend supports it; otherwise
+    return the queryset unchanged.
 
-    On Postgres that is ``SELECT ... FOR UPDATE``. SQLite has no such statement and never will:
-    it holds one write lock for the whole database, so there is nothing finer to ask for. What
-    the engine needs is not row locking as such but the guarantee behind it — that no second
-    unit of work reads a balance this one is about to change — and on SQLite the write lock
-    supplies it for the entire transaction, provided the transaction takes that lock up front.
-    That is what ``transaction_mode: "IMMEDIATE"`` does, and why ``allowances.W001`` complains
-    when it is missing.
-
-    Configured wrong, SQLite still refuses to lose the update: the second transaction fails its
-    write with ``database is locked`` instead of committing a stale balance. The mode turns that
-    error into a wait.
+    SQLite relies on its database-wide write lock, taken at ``BEGIN`` with ``transaction_mode:
+    "IMMEDIATE"`` (check ``allowances.W001``). Without that mode a concurrent write fails with
+    ``database is locked`` instead of waiting.
     """
     return qs.select_for_update() if connections[qs.db].features.has_select_for_update else qs
 
@@ -106,10 +98,7 @@ def to_wallet(row: Wallet) -> CoreWallet:
 
 
 def to_transaction(row: Transaction, record_guid: uuid.UUID | None = None) -> CoreTransaction:
-    """
-    Row to value object. Pass ``record_guid`` when the caller already knows it, to save this from
-    following the record foreign key.
-    """
+    """Row to value object. A given ``record_guid`` is used instead of following the record foreign key."""
     if record_guid is None and row.record_id is not None:
         record_guid = row.record.guid
     return CoreTransaction(
@@ -134,13 +123,11 @@ class DjangoStore:
     """
     A Store over the models in ``allowances_django.models``.
 
-    Cheap to construct — it holds no connection of its own, only a small cache mapping fulfillment
-    record guids to primary keys so writing a batch of transactions doesn't re-resolve the same
-    record for each one.
+    Holds no connection; caches fulfilment record guid → primary key.
     """
 
     def __init__(self, using: str | None = None):
-        #: Database alias, for projects that route this app to its own connection.
+        #: Database alias of the allowances tables; ``None`` for the default database.
         self.using = using
         self._record_ids: dict[uuid.UUID, int] = {}
 
@@ -311,16 +298,14 @@ class DjangoStore:
             copy.save(using=self.using)
             archived_by_id[txn.pk] = copy
 
-        # Second pass: the storno links can only be rebuilt once every archive row exists.
+        # Storno links between archive rows, set once every archive row exists.
         for txn in transactions:
             if txn.storno_of_id in archived_by_id:
                 copy = archived_by_id[txn.pk]
                 copy.storno_of = archived_by_id[txn.storno_of_id]
                 copy.save(using=self.using, update_fields=["storno_of"])
 
-        # Transaction.storno_of is PROTECT, and Django enforces that even when both rows are part of
-        # the same cascade — so the reversing rows have to go first, leaving nothing pointing at
-        # anything by the time the wallet's own delete cascades over the rest.
+        # Transaction.storno_of is PROTECT, also within one cascade: delete storno rows before the wallet.
         storno_ids = [txn.pk for txn in transactions if txn.storno_of_id]
         if storno_ids:
             self._qs(Transaction).filter(pk__in=storno_ids).delete()
@@ -376,8 +361,7 @@ class DjangoStore:
         record_id = self._record_id(record_guid)
         if record_id is None:
             return []
-        # Filtering on record_id rather than record__guid keeps this join-free, which matters
-        # because Postgres refuses to lock rows through a join.
+        # Filter on record_id, not record__guid: no join, so FOR UPDATE locks only transaction rows.
         qs = self._qs(Transaction).filter(record_id=record_id).order_by("created_at", "id")
         if lock:
             qs = _locked(qs)
@@ -386,7 +370,7 @@ class DjangoStore:
     def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         self._qs(Transaction).filter(pk__in=list(transaction_ids)).update(object_type=obj.type, object_id=obj.id)
 
-    # -- fulfillment records -------------------------------------------------------------------
+    # -- fulfilment records -------------------------------------------------------------------
 
     def get_or_create_record(self, guid: uuid.UUID | None = None) -> CoreRecord:
         if guid is None:
@@ -460,8 +444,8 @@ class DjangoStore:
 
     def lock_memberships(self) -> None:
         """
-        On PostgreSQL, a transaction-level advisory lock held until the unit of work ends. Other
-        engines take no lock: SQLite's IMMEDIATE transactions already serialise every writer.
+        On PostgreSQL, take a transaction-level advisory lock held until the unit of work ends. Other
+        backends take no lock; on SQLite, IMMEDIATE transactions serialise writers.
         """
         connection = self._connection()
         if connection.vendor != "postgresql":

@@ -4,18 +4,16 @@ description: 'Install allowances, declare features and currencies, pick the in-m
 
 # Getting started
 
-Nothing here needs a web framework. The engine is plain Python that does arithmetic against a
-[store](/backends/) you hand it, so the walkthrough below runs in a script, a Celery worker, a
-FastAPI handler or a Django view alike.
+The core needs no web framework. The engine is plain Python that works against the [store](/backends/) passed to
+it, so the code below runs in a script, a Celery worker, a FastAPI handler or a Django view.
 
-Two things have to be decided before the first call, and they are the same two everywhere:
+Every call needs:
 
-- **A definition provider** — what features and currencies exist. Configuration, not rows.
-- **A store** — where wallets and transactions live.
+- **A definition provider**: which features and currencies exist. It is configuration.
+- **A store**: where wallets and transactions are kept.
 
-Every example on this page comes in two flavours. **Core** is the library on its own, with the
-in-memory store; swap that store and the code is unchanged. **Django** is the same thing with both
-choices already made for you — definitions from `settings.ALLOWANCES`, state in your database.
+Each example has two variants. **Core** uses the library with `MemoryStore`; the code is the same with any other store.
+**Django** reads definitions from `settings.ALLOWANCES` and keeps state in the database.
 
 ## Install
 
@@ -31,7 +29,7 @@ pip install "allowances[django]"
 
 :::
 
-The core has no dependencies at all. The `django` extra adds Django and the ORM-backed store.
+The core has no dependencies. The `django` extra adds Django and the ORM-backed store.
 
 ::: code-group
 
@@ -55,14 +53,13 @@ INSTALLED_APPS = [
 
 :::
 
-`MemoryStore` is for tests and for trying things out — it dies with the process. For real storage,
-either install the Django backend or [write your own](/backends/writing-a-backend): it is twenty-two
-methods.
+`MemoryStore` keeps data only for the lifetime of the process and is meant for tests. For persistent storage, use the
+Django backend or [write a backend](/backends/writing-a-backend) implementing the 22-method store port.
 
 ## Declare what exists
 
-Currencies are the units you count; features are the capabilities that consume them. The dict is
-identical in both cases — only where it is read from differs.
+Currencies are the counted units; features are the capabilities that consume them. The dict is the same in both
+variants; only its source differs.
 
 ::: code-group
 
@@ -111,17 +108,16 @@ ALLOWANCES = {
 
 :::
 
-Read as: sending one email costs one `email_send`, or half a `credit`. Try the user's wallets before
-the team's. `round_fn: "ceil"` on credits means a fractional cost is charged as a whole credit — you
-never charge 0.5 of something you can't divide.
+Sending one email costs one `email_send`, or half a unit of `credits`. The user's wallets are tried before the
+team's. `round_fn: "ceil"` on `credits` rounds a fractional cost up to a whole credit.
 
-A provider is an interface, not a dict reader: definitions can just as well come from a database
-table or a service call. See [`DefinitionProvider`](/api/core#definitionprovider).
+A provider is an interface: definitions can also come from a database table or a service call. See
+[`DefinitionProvider`](/api/core#definitionprovider).
 
 ## Name the subjects
 
-A subject is whatever holds the licence — a user, a team, a device, a location. The core never sees
-your objects, only a `(type, id)` pair.
+A subject is the holder of a licence: a user, a team, a device, a location. The core receives only a `(type, id)`
+pair, not application objects.
 
 ::: code-group
 
@@ -140,13 +136,13 @@ subjects = {"user": request.user, "team": team}
 
 :::
 
-The keys (`"user"`, `"team"`) are the names your `fulfillment_order` refers to. The `type` string is
-yours to choose; the Django adapter uses `"app_label.modelname"`.
+The keys (`"user"`, `"team"`) are the names `fulfillment_order` refers to. The `type` string is chosen by the
+application; the Django adapter uses `"app_label.modelname"`.
 
-## Give somebody something to spend
+## Open wallets
 
-Wallets hold balances. `plan_switch` is the usual way to open them — it closes the subject's plan
-wallets and opens a new set atomically, which is exactly what putting someone on a plan means:
+Wallets hold balances. `plan_switch` opens them for a plan: it closes the subject's plan wallets and opens a new set in
+one transaction:
 
 ::: code-group
 
@@ -182,13 +178,12 @@ plan_switch(
 
 :::
 
-The only difference is the first argument: the core functions take the store explicitly, the Django
-shortcuts supply it — and the provider — for you.
+The core functions take the store as the first argument; the Django shortcuts supply the store and the provider.
 
 Wallets outside a plan — a purchased credit pack, a spending budget — are opened with `open_wallet`
 and funded with `credit`; see [Credits and budgets](/guide/credits-and-budgets).
 
-## Spend it
+## Consume
 
 ::: code-group
 
@@ -213,8 +208,8 @@ except InsufficientBalanceError as exc:
 
 :::
 
-`fulfill` either covers the whole request or raises and rolls back — there is no half-charged state
-to clean up. It returns a `FulfillmentResult`:
+By default (`allow_partial=False`) `fulfill` covers the whole request or raises `InsufficientBalanceError` and
+writes nothing. It returns a `FulfillmentResult`:
 
 ```python
 result.requested   # Decimal("1")
@@ -224,10 +219,10 @@ result.guid        # UUID — the handle for attaching and reversing
 result.transactions  # the ledger entries just written
 ```
 
-## Close the loop
+## Attach the object
 
-Fulfillment happens *before* the work: you take the quota, then send the email. Tell the ledger which
-object it paid for once that succeeds:
+Fulfilment runs before the operation: the quota is consumed, then the email is sent. When the operation succeeds,
+`attach` links the ledger entries to the object they paid for:
 
 ::: code-group
 
@@ -247,13 +242,12 @@ attach(result.guid, message)
 
 :::
 
-This matters more than it looks. A transaction with nothing attached is quota that was spent on
-something that may never have happened — and [that is a query you can
-run](/guide/reversals#finding-what-broke).
+A transaction without an attached object marks consumption whose operation may not have completed;
+[Recovery sweep](/guide/reversals#recovery-sweep) lists such records.
 
-## Undo it
+## Reverse
 
-If the operation fails, give it back:
+If the operation fails, `unfulfill` reverses it:
 
 ::: code-group
 
@@ -271,10 +265,10 @@ unfulfill(result.guid)
 
 :::
 
-Nothing is deleted. Each original entry gets a matching storno entry, so the history still shows what
-was taken and what gave it back. Calling it twice is safe.
+Nothing is deleted. Each original entry gets a matching storno entry, so the history shows both the consumption and
+its reversal. A second call for the same `guid` writes nothing.
 
-## Ask without spending
+## Check without consuming
 
 ::: code-group
 
@@ -294,12 +288,12 @@ if peek("send_email", 10, {"user": request.user}).satisfied:
 
 :::
 
-`peek` runs the same planning walk as `fulfill` and writes nothing. It is a snapshot, not a
-reservation — a concurrent caller can spend what it just told you was there.
+`peek` runs the same planning as `fulfill` and writes nothing. It is a snapshot, not a reservation: a concurrent
+caller can consume the balance it reported.
 
 ## Where to go next
 
 - [Concepts](/guide/concepts) — the vocabulary in full.
-- [Fulfillment order](/guide/fulfillment-order) — the part worth understanding properly.
+- [Fulfilment order](/guide/fulfillment-order) — the order wallets are drawn in.
 - [Sliding windows](/guide/sliding-windows) — "200 a day" without a reset job.
-- [How the port works](/backends/) — if the store you want isn't one of the two shipped.
+- [How the port works](/backends/) — the store interface, for writing another backend.

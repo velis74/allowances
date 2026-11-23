@@ -4,7 +4,11 @@ description: 'Set up Django permissions served by allowances: the authentication
 
 # Permissions quick start
 
-This page sets up a Django project whose permission checks — `user.has_perm`, `@permission_required`, `{% if perms.… %}`, DRF permission classes — are answered from allowances. The examples assume an application `club` with a model `Member`, so Django has the permission `club.change_member`. [Rights and permissions](/guide/permissions) explains the model behind it and [when to choose it over Django's own permissions](/guide/permissions#allowances-or-django-contrib-auth).
+This page sets up a Django project whose permission checks — `user.has_perm`, `@permission_required`, `{% if perms.…
+%}`, DRF permission classes — are answered from allowances. The examples assume an application `club` with a model
+`Member`, so Django has the permission `club.change_member`. [Rights and permissions](/guide/permissions) explains the
+model behind it and [when to choose it over Django's own
+permissions](/guide/permissions#allowances-or-django-contrib-auth).
 
 ## Install
 
@@ -32,9 +36,12 @@ AUTHENTICATION_BACKENDS = [
 python manage.py migrate
 ```
 
-With both backends a user holds a permission that either of them grants: Django's `user_permissions` and `Group.permissions` keep working next to the rights held in allowances.
+With both backends a user holds a permission that either of them grants: Django's `user_permissions` and
+`Group.permissions` keep working next to the rights held in allowances.
 
-`AllowancesBackend` authenticates nobody. To make it the only source of permissions, pair it with a login backend that answers no permission checks, such as a `ModelBackend` subclass that reads neither `user_permissions` nor `Group.permissions`:
+`AllowancesBackend` authenticates nobody. To make it the only source of permissions, pair it with a login backend that
+answers no permission checks, such as a `ModelBackend` subclass that reads neither `user_permissions` nor
+`Group.permissions`:
 
 ```python
 # accounts/backends.py
@@ -59,7 +66,8 @@ class LoginBackend(ModelBackend):
         return get_user_model()._default_manager.none()
 ```
 
-`get_all_permissions`, `has_perm`, `has_module_perms` and their async variants build on the first four methods, so they return nothing from this backend either.
+`get_all_permissions`, `has_perm`, `has_module_perms` and their async variants build on the first four methods, so they
+return nothing from this backend either.
 
 ```python
 AUTHENTICATION_BACKENDS = [
@@ -68,15 +76,18 @@ AUTHENTICATION_BACKENDS = [
 ]
 ```
 
-No `ALLOWANCES` setting is needed: every permission `"app_label.codename"` is served as the feature and currency `"perm:app_label.codename"`.
+No `ALLOWANCES` setting is needed: every permission `"app_label.codename"` is served as the feature and currency
+`"perm:app_label.codename"`.
 
 ::: tip SQLite
-On SQLite set `DATABASES["default"]["OPTIONS"]["transaction_mode"] = "IMMEDIATE"`. The system check `allowances.W001` warns when it is missing; see [SQLite](/backends/django#sqlite).
+On SQLite set `DATABASES["default"]["OPTIONS"]["transaction_mode"] = "IMMEDIATE"`. The system check `allowances.W001`
+warns when it is missing; see [SQLite](/backends/django#sqlite).
 :::
 
 ## Grant a permission to a group
 
-A group is any model instance; here it is Django's `auth.Group`. Membership is recorded with `add_member`: `AllowancesBackend` reads allowances memberships only, and `user.groups` counts only for `ModelBackend`.
+A group is any model instance; here it is Django's `auth.Group`. Membership is recorded with `add_member`:
+`AllowancesBackend` reads allowances memberships only, and `user.groups` counts only for `ModelBackend`.
 
 ```python
 from django.contrib.auth.models import Group, User
@@ -93,7 +104,8 @@ grant_permission(editors, "club.change_member")
 User.objects.get(pk=user.pk).has_perm("club.change_member")   # True
 ```
 
-The backend caches a user's permission set on the user object, as `ModelBackend` does. A grant or revocation is seen by a freshly loaded user object, which every request has.
+The backend caches a user's permission set on the user object, as `ModelBackend` does. A grant or revocation takes
+effect for the next loaded user object, which each request loads anew.
 
 ## Check it
 
@@ -150,7 +162,7 @@ from django.utils import timezone
 grant_permission(user, "club.view_report", valid_until=timezone.now() + timedelta(days=30))
 ```
 
-The permission stops counting at `valid_until`; no job has to run. `valid_from=` starts a grant later.
+The permission is not held from `valid_until` on; no scheduled job is needed. `valid_from=` starts a grant later.
 
 ## Nested groups
 
@@ -167,11 +179,13 @@ grant_permission(organisation, "club.view_member")
 User.objects.get(pk=user.pk).has_perm("club.view_member")   # True, through two levels
 ```
 
-`add_member` raises `MembershipCycleError` for a membership that would form a cycle. The group need not be an `auth.Group`: a `Club`, an `Organisation` or a `Device` model works the same way.
+`add_member` raises `MembershipCycleError` for a membership that would form a cycle. The group need not be an
+`auth.Group`: a `Club`, an `Organisation` or a `Device` model works the same way.
 
 ## Where a right comes from
 
-`effective_allowances` lists every wallet a subject holds, its own and its groups'; `effective_permissions` keeps the ones that are Django permissions and groups them by permission.
+`effective_allowances` lists every wallet a subject holds, its own and its groups'; `effective_permissions` keeps the
+ones that are Django permissions and groups them by permission.
 
 ```python
 from allowances_django.permissions import effective_permissions
@@ -194,11 +208,15 @@ effective_permissions(effective_allowances(user))
 # }
 ```
 
-`holder` is the subject whose wallet confers the permission and `depth` how far it is from the user: 0 for the user's own grant, 1 for a direct group, 2 for a group of that group. `effective_allowances` takes any subject, not only users — `effective_allowances(department)` shows what the department holds. [Effective permissions](/guide/permissions#effective-permissions) describes the result in full.
+`holder` is the subject whose wallet confers the permission and `depth` how far it is from the user: 0 for the user's
+own grant, 1 for a direct group, 2 for a group of that group. `effective_allowances` takes any subject, not only users —
+`effective_allowances(department)` shows what the department holds. [Effective
+permissions](/guide/permissions#effective-permissions) describes the result in full.
 
 ## Record each use
 
-`has_perm` checks a right and writes nothing. To keep a record of who used it and on what, call `fulfill` with the permission's feature and attach the object:
+`has_perm` checks a right and writes nothing. To keep a record of who used it and on what, call `fulfill` with the
+permission's feature and attach the object:
 
 ```python
 from django.core.exceptions import PermissionDenied
@@ -221,7 +239,9 @@ def update_member(request, member):
     attach(result.guid, member)
 ```
 
-The entry goes on the wallet that holds the right — the `editors` group's — with `request.user` as its actor, at amount 0. `fulfill` resolves the user and its groups like the backend, but does not apply the superuser rule. See [The actor](/guide/permissions#the-actor).
+The entry goes on the wallet that holds the right — the `editors` group's — with `request.user` as its actor,
+at amount 0. `fulfill` resolves the user and its groups like the backend, but does not apply the superuser rule.
+See [The actor](/guide/permissions#the-actor).
 
 ## Revoke
 
@@ -233,4 +253,5 @@ revoke_permission(editors, "club.change_member")   # 1: the number of wallets cl
 remove_member(user, department)                    # True
 ```
 
-Every member of `editors` loses the permission at once, unless it holds it another way. `remove_member` removes one member's access to everything the group holds.
+Every member of `editors` loses the permission at once, unless it holds it another way. `remove_member` removes one
+member's access to everything the group holds.

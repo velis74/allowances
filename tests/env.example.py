@@ -1,12 +1,11 @@
 """
 Copy to ``tests/env.py`` (gitignored) to run the suite against something other than SQLite.
 
-You do not need this file to run the tests. Without it the suite uses a file-backed SQLite
-database configured exactly as the library asks deployments to configure one — IMMEDIATE
-transactions, WAL, a real busy timeout — and passes in full.
+Without this file the suite uses a file-backed SQLite database with the settings the library
+requires of SQLite deployments: IMMEDIATE transactions, WAL and a busy timeout.
 
-Both engines are supported and CI runs both, so covering Postgres locally is still worth the
-five minutes. Point this at a database of its own, never at a host database you care about.
+CI runs the suite on both engines. Use a dedicated database server or user: Django creates and
+drops the test database (``TEST.NAME``) on it.
 """
 
 DATABASE = dict(

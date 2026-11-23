@@ -1,17 +1,19 @@
 # Sliding windows
 
-"200 emails a day" is a different thing from "200 emails". The first replenishes; the second doesn't.
+A wallet with a `reset_config` holds an amount per time window (for example 200 emails a day); a wallet without it
+holds a fixed amount. No scheduled job resets windowed balances: the balance is computed from the ledger entries inside
+the current window, so no entry is overwritten.
 
-The obvious implementation is a scheduled job that resets balances at midnight. This library doesn't do that, because a reset job is a liability: it can fail, it can run twice, it can run late, it has to know about every wallet in the system, and it destroys the very history you wanted the ledger for.
-
-## How it works instead
+## Windowed balance
 
 Give a wallet a `reset_config` and two things change:
 
-1. Its stored `balance` becomes a **per-window allotment** — fulfillment never modifies it; only a plan switch with an `adjust` or `top_up` [policy](/guide/plans-and-archival#switch-policies) and `adjust_wallet` set a new one.
+1. Its stored `balance` becomes a **per-window allotment**. Fulfilment never modifies it; only a plan switch with an
+   `adjust` or `top_up` [policy](/guide/plans-and-archival#switch-policies) and `adjust_wallet` set a new one.
 2. Its effective balance is that allotment **plus every transaction inside the current window**.
 
-Consumption entries are negative, so the balance nets down as the window fills. When the window moves on, old entries fall outside it and stop counting — the quota appears to reset, without anything having written to anything.
+Consumption entries are negative, so the balance decreases as the window fills. Entries older than the window no
+longer count, so the amount becomes available again without any write.
 
 ```python
 WalletSpec(
@@ -20,44 +22,49 @@ WalletSpec(
 )
 ```
 
-Nothing needs to run at midnight. There is no job to monitor, and at 00:00 the wallet's row is byte-for-byte what it was at 23:59.
-
 ## Configuration shapes
 
 | Shape | Meaning |
 | --- | --- |
 | `{"time": "00:00:00"}` | Daily, resetting at that UTC time. |
 | `{"day_of_week": 0, "time": "00:00:00"}` | Weekly. `0` is Monday, following `date.weekday()`. |
-| `{"day_of_month": 1, "time": "00:00:00"}` | Monthly, clamped to the last real day of shorter months. |
-| `{"window_seconds": 3600}` | A rolling window with no calendar anchor — the last hour, continuously. |
-| `{}` | Rolling, defaulting to 24 hours. |
-| `None` | Not a windowed wallet at all. Balance is a plain stored amount. |
+| `{"day_of_month": 1, "time": "00:00:00"}` | Monthly, clamped to the last day of shorter months. |
+| `{"window_seconds": 3600}` | A rolling window with no calendar anchor: the last hour, continuously. |
+| `{}` | Rolling, 24 hours by default. |
+| `None` | Not a windowed wallet. The balance is a plain stored amount. |
 
-`day_of_month: 31` in February means the 28th — or the 29th in a leap year — rather than an error.
+`day_of_month: 31` in February means the 28th, or the 29th in a leap year; it is not an error.
 
-All arithmetic is UTC. A naive datetime handed in is assumed to already be UTC rather than rejected.
+All arithmetic is UTC. A naive datetime is treated as UTC.
 
 ## Calendar reset vs. rolling window
 
-The distinction matters for how it feels to a user.
+A **calendar reset** (`time`, `day_of_week`, `day_of_month`) gives every wallet the same boundary. Spending 200 at
+23:55 makes 200 available again at 00:00, so up to 400 can be used within minutes across the boundary.
 
-A **calendar reset** (`time`, `day_of_week`, `day_of_month`) gives everyone the same boundary. Spend all 200 at 23:55 and you have 200 again five minutes later. Predictable, and occasionally exploitable.
+A **rolling window** (`window_seconds`) is per transaction. Each consumed amount becomes available again when its entry
+is older than the window: 200 spent at 23:55 return at 23:55 the next day.
 
-A **rolling window** (`window_seconds`) is per-transaction. Spend 200 at 23:55 and you get them back at 23:55 the following day, one at a time as each entry ages out. Harder to game, harder to explain to a customer.
+Calendar resets suit quotas users plan around ("your monthly allowance"). Rolling windows suit rate limits ("no more
+than 200 an hour").
 
-Calendar resets suit quotas people plan around ("your monthly allowance"). Rolling windows suit abuse prevention ("no more than 200 an hour").
+## Performance
 
-## What this costs
+Every fulfilment against a windowed wallet sums that wallet's transactions inside the window. The Django backend has
+an index on `(wallet, created_at)` for this query. The cost grows with the number of entries in the window.
 
-Every fulfillment against a windowed wallet sums that wallet's transactions inside the window. In Postgres that is one aggregate over `(wallet_id, created_at)`, which the Django backend indexes for exactly this reason. It is cheap at the volumes most applications have and it is not free: a wallet with millions of entries per window will feel it. If you get there, the answer is a periodic compaction that archives aged-out entries — the archive tables already exist for it.
+## Archival, overdraft and reversals
 
-## Things that behave differently
+**Windowed wallets are not archived when drained.** A balance at zero is a normal state for them, as the window
+restores it. They are archived only when they [expire](/guide/plans-and-archival#expiry).
 
-**Windowed wallets are never archived for being spent out.** A balance at zero is a normal state for them; they replenish by design. They are only archived when they [expire](/guide/plans-and-archival#expiry).
+**`first_overdraft_at` is set.** A windowed wallet can go negative within a window if the feature allows overdraft,
+and the first time it does is recorded.
 
-**`first_overdraft_at` still gets set.** A windowed wallet can go negative within a window if the feature allows overdraft, and the first time it does is still recorded.
-
-**Reversals land in whichever window they happen in.** Reverse inside the same window and the storno nets the consumption straight back out. Reverse *after* the window has passed and the original consumption has already aged out, so the storno is a positive entry in the *new* window — it credits a window that never paid. This is the honest behaviour for an append-only ledger, but it is worth knowing before you build a recovery flow that runs on a long delay.
+**Reversals are booked in the window in which they happen.** A reversal inside the same window cancels the consumption.
+After the window has passed, the original consumption no longer counts, so the storno is a positive entry in the new
+window and raises that window's balance above its allotment. A reversal delayed by more than the window therefore adds
+to the current window.
 
 ## Checking a balance
 
@@ -68,8 +75,8 @@ from allowances_django.store import DjangoStore
 store = DjangoStore()
 wallet = store.find_wallets(...)[0]
 
-effective_balance(store, wallet)   # what fulfillment will actually see
-wallet.balance                     # the allotment — usually not what you want to show a user
+effective_balance(store, wallet)   # balance used by fulfillment
+wallet.balance                     # per-window allotment
 ```
 
-For a non-windowed wallet the two are the same.
+For a wallet without a window the two are the same.

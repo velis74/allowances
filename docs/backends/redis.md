@@ -1,36 +1,50 @@
-# Would Redis work?
+# Redis as a backend
 
-Partly. It is an excellent fit for one half of this library and a poor one for the other, and the useful answer is which half is which.
+Redis suits balances and sliding-window arithmetic; it does not suit the ledger and the archive.
 
-No Redis backend ships. This page exists so that the decision to write one is made with the tradeoffs visible.
+No Redis backend ships. This page lists the trade-offs of writing one.
 
-## Where Redis is genuinely better
+## Advantages
 
-**Sliding windows are a native Redis shape.** A [windowed wallet](/guide/sliding-windows) is the textbook sorted-set rate limiter: entries scored by timestamp, `ZREMRANGEBYSCORE` to drop what aged out, `ZRANGEBYSCORE` to sum what's left. In Postgres the same thing is an aggregate over an index. Redis was built for it.
+**Sliding windows.** A [windowed wallet](/guide/sliding-windows) maps to a sorted set scored by timestamp:
+`ZREMRANGEBYSCORE` drops expired entries and `ZRANGEBYSCORE` returns the remaining ones, which a Lua script sums. In
+PostgreSQL the same computation is an aggregate over an index.
 
-**Atomicity without locking.** The whole planning-and-writing sequence of a `fulfill` can be one Lua script, which Redis runs to completion with nothing else interleaved. No `SELECT FOR UPDATE`, no lock contention, no deadlock risk. For a hot path this is genuinely nicer than what the relational backend can do.
+**Atomicity without locking.** The whole planning-and-writing sequence of a `fulfill` can be one Lua script, which
+Redis runs to completion with no other command interleaved. It needs no `SELECT FOR UPDATE` and cannot deadlock.
 
-**Throughput.** Quota checks on every request, at rates where a database round-trip per check is the bottleneck, is exactly the workload Redis exists for.
+**Throughput.** Redis suits quota checks on every request where a database round-trip per check is the bottleneck.
 
-## Where it fails
+## Disadvantages
 
-**The ledger is append-only and unbounded.** This library never edits a transaction and never deletes one while it matters. That history is the point — it is what answers "why are my credits gone". In Redis it is RAM, growing forever. You would need a compaction or eviction strategy, and every one of those trades away some of the auditability you were storing it for.
+**The ledger is append-only and unbounded.** The library never edits a transaction and never deletes a live one; the
+ledger is the audit trail of every balance change. In Redis it occupies memory without bound. Compaction or eviction
+keeps memory bounded but removes audit data.
 
-**Durability is approximate.** With AOF at `everysec` you can lose up to a second of writes on an unclean shutdown. For a cache that is irrelevant. For a ledger where the entries *are* the record of what a customer was charged, a second of silently vanished entries is a real if small liability — and worse, an invisible one.
+**Durability is approximate.** With AOF at `everysec`, an unclean shutdown loses up to one second of writes. Lost
+ledger entries are lost records of what a customer was charged, and nothing reports the loss.
 
-**Ad-hoc queries need hand-built indexes.** `records_with_unattached_transactions` is one `WHERE` clause in SQL. In Redis it needs a secondary index you maintain yourself, kept consistent across every write path, including the failure ones. Same for admin browsing, reporting, and every "which wallets are in overdraft" question you haven't thought of yet. Each is a set to maintain, and each is a chance to drift.
+**Ad-hoc queries need hand-built indexes.** `records_with_unattached_transactions` is one `WHERE` clause in SQL. In
+Redis it needs a secondary index maintained by the store and kept consistent on every write path, failure paths
+included. Admin browsing and reporting (for example, wallets in overdraft) each need another such index.
 
-**The archive doubles the problem.** Archived wallets and their entire transaction history would also be in RAM — the data you keep precisely because you rarely read it, held in your most expensive storage.
+**Archive.** Archived wallets and their transactions would also be held in memory, although they are rarely read.
 
-## What to build instead
+## Alternatives
 
-**Hybrid, not replacement.** Redis for balances and window arithmetic; a relational store for the ledger. The port makes this expressible — a store that writes entries through to Postgres while keeping windowed balances in Redis. More work than either alone, and it gets both properties.
+**Hybrid store.** Balances and window arithmetic in Redis, the ledger in a relational store: one store that writes
+entries through to PostgreSQL and keeps windowed balances in Redis. The port allows this; it is more work than either
+store alone.
 
-**Or Redis for a genuinely disposable subset.** If some features are pure rate limiting — "no more than 200 an hour", where nobody will ever ask for an audit trail and losing a second of history costs nothing — those can live in a Redis store with `UnsupportedOperationError` on the archive and scan methods. Keep billable entitlements in Postgres. Two stores, chosen per feature.
+**Redis for rate-limit features only.** Features that need no audit trail and tolerate losing a second of history
+(for example, "at most 200 an hour") can use a Redis store that raises `UnsupportedOperationError` from the archive and
+scan methods. Billable entitlements stay in PostgreSQL: two stores, chosen per feature.
 
-## If you write one anyway
+## Requirements for a Redis store
 
-- Do the whole `fulfill` sequence in Lua. Read-then-write from the client reintroduces exactly the race the script would have avoided.
-- Persist with AOF at `always` if the ledger matters, and measure what it costs before assuming it's fine.
-- Raise `UnsupportedOperationError` from what you haven't indexed, rather than returning an empty list. An empty list is indistinguishable from "nothing to report".
-- Run [this library's engine test suite](/backends/writing-a-backend#testing-yours) against it. It is written against the port, so it will run against your backend unmodified.
+- Run the whole `fulfill` sequence in one Lua script. Reading and then writing from the client allows two calls to
+  spend the same balance.
+- Persist with AOF `appendfsync always` if the ledger is kept; it lowers write throughput.
+- Raise `UnsupportedOperationError` from methods without an index instead of returning an empty list. An empty list
+  cannot be told apart from "nothing to report".
+- Run [the library's engine test suite](/backends/writing-a-backend#testing-a-backend) against it.

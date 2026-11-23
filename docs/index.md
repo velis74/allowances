@@ -1,12 +1,12 @@
 ---
 title: Python quotas, credits and entitlements
-description: 'May this happen, and can they afford it? Python grants and consumable budgets paid from several wallets, with an append-only ledger and storno. Django.'
+description: 'Python grants and consumable budgets paid from several wallets, with an append-only ledger and storno, and a Django backend.'
 layout: home
 
 hero:
   name: allowances
-  text: Grants and budgets, enforced and auditable
-  tagline: Ask "may this happen, and can they afford it?" — get an answer, a ledger entry, and a way to undo it. Storage-agnostic, with a Django backend.
+  text: Grants and budgets with a ledger
+  tagline: Checks a grant or budget, records each consumption in a ledger and reverses it with a storno. Storage-agnostic, with a Django backend.
   actions:
     - theme: brand
       text: What it is
@@ -19,15 +19,15 @@ hero:
       link: /api/core
 
 features:
-  - title: Two kinds of right, one flow
-    details: A boolean grant ("has a Pro subscription") and a consumable budget ("200 emails a day") coexist in the same fulfillment call, drawn in an order you declare.
-  - title: Every unit accounted for
-    details: Nothing is edited in place. Consumption writes a ledger entry, reversal writes a matching storno, and spent-out wallets move to an archive rather than disappearing.
-  - title: Spend from several sources
-    details: One operation can be paid for out of a specific budget, then general credits, then a promotional grant — at conversion rates you set, with a deterministic priority.
-  - title: Django permissions that expire, nest and leave a record
-    details: Serve has_perm from grant wallets of users, groups nested to any depth, organisations or devices. Rights expire on their own, come with plans or purchases, and every use can be recorded with its actor.
+  - title: Grants and consumable budgets in one call
+    details: A boolean grant ("has a Pro subscription") and a consumable budget ("200 emails a day") are resolved in the same fulfilment call, in the declared fulfilment order.
+  - title: Append-only ledger
+    details: Ledger entries are not edited. Consumption writes a ledger entry, reversal writes a matching storno, and drained wallets are moved to an archive.
+  - title: Several sources per operation
+    details: One operation can draw from a specific budget, then general credits, then a promotional grant, at configured conversion rates and in a deterministic order.
+  - title: Expiring, nested and recorded Django permissions
+    details: AllowancesBackend answers has_perm from grant wallets of users, groups nested to any depth, organisations or devices. Rights expire at valid_until, come with plans or purchases, and each use can be recorded with its actor.
     link: /guide/permissions-quick-start
   - title: No ORM in the core
-    details: The engine talks to a twenty-two-method storage port. Postgres and SQLite via Django ship with it; anything else is an afternoon's work.
+    details: The engine accesses storage through a 22-method store port. The Django store (Postgres, SQLite) and an in-memory store are included; other backends implement the port.
 ---

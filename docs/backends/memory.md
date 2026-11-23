@@ -1,8 +1,10 @@
 # In-memory backend
 
-A complete store over plain dicts. It ships with the core and needs nothing installed.
+A complete store over plain dicts. It is part of the core package and has no dependencies.
 
 ```python
+from decimal import Decimal
+
 from allowances import DictProvider, SubjectRef, WalletType, fulfill
 from allowances.backends import MemoryStore
 
@@ -25,33 +27,41 @@ store.create_wallet(
 fulfill(store, "send_email", 3, {"user": user}, provider)
 ```
 
-## What it's for
+## Uses
 
-**Fast tests.** The engine's behaviour is arithmetic — proving it doesn't need a database. This library's own suite runs every engine test against this backend and again against Django, and the whole thing takes under a second.
+**Tests.** Engine tests run without a database; the library's engine tests run against this backend and against
+Django.
 
-**Keeping the port honest.** Every time the engine reaches for something only an ORM could do, this backend stops working. That is the alarm that the abstraction has leaked, and it goes off during development rather than during someone else's port.
+**Port check.** Engine code that requires ORM features fails on this backend.
 
-**Trying things out.** Modelling a feature's currencies and fulfillment order is a lot easier when the feedback loop is a Python prompt.
+**Experiments.** Feature definitions (currencies, fulfilment order) can be tried in a Python shell.
 
-## What it isn't
+## Limitations
 
-Not for production, and not close. State lives in a dict: it dies with the process and is invisible to every other one. Locking is a process-local `RLock`, which is exactly as much concurrency control as a single-process test needs and no more.
+Not for production. State is held in process memory, is lost when the process ends and is not shared with other
+processes. Locking is a process-local `RLock`.
 
-## How it behaves
+## Behaviour
 
-**`unit_of_work()` is real.** Every block snapshots every collection and restores it if anything raises, so rollback genuinely rolls back. A nested block that raises discards only its own writes, the way a nested `atomic()` rolls back to its savepoint.
+**`unit_of_work()` rolls back.** Every block snapshots every collection and restores it when the block raises. A
+nested block that raises discards only its own writes, as a nested `atomic()` rolls back to its savepoint.
 
-**Ordering is deterministic.** Rows carry an insertion sequence alongside their timestamp, so wallets created within the same microsecond still come back in a stable order — otherwise tests would pass or fail depending on clock resolution.
+**Ordering is deterministic.** Rows carry an insertion sequence alongside their timestamp, so wallets created within
+the same microsecond come back in a stable order regardless of clock resolution.
 
-**Double-storno is refused.** The relational backends have a unique constraint; this one raises `ValueError`. A lost race there would silently refund twice, so it refuses just as loudly.
+**Double-storno is refused.** The relational backends have a unique constraint; this one raises `ValueError`.
 
-**Locks are the store-wide lock.** `lock_wallets` returns the wallets in ascending id order without taking anything further, and `lock_memberships` does nothing: `unit_of_work` already holds the store's `RLock`. Memberships are rolled back with everything else.
+**Locks are the store-wide lock.** `lock_wallets` returns the wallets in ascending id order without taking anything
+further, and `lock_memberships` does nothing: `unit_of_work` already holds the store's `RLock`. Memberships are rolled
+back with everything else.
 
-**Archiving works.** Archived wallets and transactions move to `store.archived_wallets` and `store.archived_transactions` rather than vanishing.
+**Archiving moves rows.** Archived wallets and transactions move to `store.archived_wallets` and
+`store.archived_transactions`.
 
 ## Seeding modifiers
 
-Modifiers are created by applications, not by the engine, so seeding them isn't part of the store port. This backend offers a helper anyway:
+Modifiers are created by applications, not by the engine, so seeding them is not part of the store port. This backend
+has a helper for it:
 
 ```python
 store.add_modifier(subject=user, feature="send_email", factor=Decimal("0.5"))

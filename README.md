@@ -1,39 +1,50 @@
 # allowances
 
-Grants and consumable budgets — enforced before the fact, auditable after it. Storage-agnostic, with a Django backend that also serves Django permissions: expiring, inherited through nested groups, held by any model, and each use can be recorded.
+Grants and consumable budgets, checked before an operation and recorded in an append-only ledger. Storage-agnostic,
+with a Django backend that also serves Django permissions: expiring, inherited through nested groups, held by any model,
+with each use recordable on the ledger.
 
-📖 **Documentation:** [docs.velis.si/allowances](https://docs.velis.si/allowances). The source lives in `docs/` — `npm install && npm run docs:dev` serves it locally.
+📖 **Documentation:** [docs.velis.si/allowances](https://docs.velis.si/allowances). The source is in `docs/`;
+`npm install && npm run docs:dev` serves it locally.
 
 ---
 
 ## What it does
 
-Applications keep needing to answer the same shape of question:
+Typical checks:
 
-> Can this user send an email right now? How many API calls does this organisation have left this month? Does this device still have a service contract, and does the customer have enough coolant credit to fill it?
+- whether a user may send an email now;
+- how many API calls an organisation has left this month;
+- whether a device has a valid service contract and the customer enough coolant credit to fill it.
 
-`allowances` answers it, records what the answer cost, and lets you take it back if the operation it paid for never happened.
+`fulfill` checks and consumes the balance and writes a ledger entry; `unfulfill` reverses the entries of an operation
+that did not complete.
 
-The same wallets hold rights that are not spent. In Django they answer `user.has_perm`, `@permission_required` and `{% if perms.… %}` through an authentication backend — see the [Permissions quick start](https://docs.velis.si/allowances/guide/permissions-quick-start).
+The same wallets hold rights that are not consumed. In Django they answer `user.has_perm`, `@permission_required` and
+`{% if perms.… %}` through an authentication backend; see the
+[Permissions quick start](https://docs.velis.si/allowances/guide/permissions-quick-start).
 
-It is **not a payment system** — no invoices, no card charges, no money anywhere. The units it counts are whatever you say they are. Use it for rights that are bought, expire, or get spent.
+It is not a payment system: it has no invoices or card charges. Units are defined by the application. It covers rights
+that are bought, expire or are consumed.
 
 ## Install
 
-Django is optional. The core is `import allowances` and depends on nothing at all — not Django, not a database driver, not anything outside the standard library. Everything that matters (the ordering walk, conversion, rounding, overdraft, sliding windows) lives there, and talks to storage through a twenty-two-method port.
+Django is optional. The core (`import allowances`) uses only the standard library. It implements the fulfilment
+order, conversion, rounding, overdraft and sliding windows, and accesses storage through a 22-method store port.
 
 ```bash
 pip install allowances            # the engine, zero dependencies
 pip install "allowances[django]"  # ...and the Django models, store and admin
 ```
 
-The Django binding is one extra line, and the rest of this README assumes you took it:
+The Django backend is enabled in `INSTALLED_APPS`; the examples below use it:
 
 ```python
 INSTALLED_APPS = ["allowances_django"]
 ```
 
-Without it you supply your own `Store` — a dict-backed one ships in the box for tests, and [writing another](https://docs.velis.si/allowances/backends/writing-a-backend) is an afternoon.
+Without it, pass a `Store` to the core functions: the core includes the dict-backed `MemoryStore` for tests, and
+[Writing a backend](https://docs.velis.si/allowances/backends/writing-a-backend) describes the port.
 
 ## Use
 
@@ -64,15 +75,18 @@ except InsufficientBalanceError as exc:
     return http_402(f"Only {exc.result.granted} left")
 
 message = send_the_email()
-attach(result.guid, message)   # record what the quota bought
+attach(result.guid, message)   # link the ledger entries to the sent message
 # ...or unfulfill(result.guid) if it failed
 ```
 
-## The shape of it
+## Architecture
 
-Two layers, kept apart. **Definition** — what rights exist at all: features, currencies, conversion rates, priority order. Configuration, not rows. **State** — what a subject holds and has spent: wallets and a transaction ledger.
+The library separates two layers. **Definition**: which rights exist, i.e. features, currencies, conversion rates and
+priority order; it is configuration. **State**: what a subject holds and has consumed, i.e. wallets and a transaction
+ledger.
 
-The engine sits between them and knows nothing about either's storage. It receives definitions through a provider and state through a twenty-two-method store port, which is why the same code runs against Postgres, SQLite or a dict.
+The engine reads definitions through a `DefinitionProvider` and state through a 22-method store port; it runs unchanged
+on Postgres, SQLite or `MemoryStore`.
 
 ```
    allowances.engine        peek · fulfill · unfulfill · transfer · add_member · plan_switch
@@ -88,21 +102,32 @@ MemoryStore    DictProvider
 
 Highlights:
 
-- **Grants and consumables in one flow.** A boolean entitlement and a metered budget resolve together, in an order you declare.
-- **Multi-source payment.** One operation can draw from a dedicated budget, then general credits, then a promotional grant, at conversion rates you set.
-- **Nothing edited in place.** Consumption writes a ledger entry; reversal writes a matching storno; spent-out wallets move to an archive.
-- **Sliding windows without a reset job.** "200 a day" works by ageing consumption out of a window, not by a nightly job that can fail.
-- **Multi-subject.** A licence can belong to a user, an organisation, a device, a location — resolved across all of them in one call, together with the groups each one is a member of.
+- **Grants and consumables in one call.** A boolean entitlement and a metered budget are resolved together, in the
+  declared fulfilment order.
+- **Several sources.** One operation can draw from a dedicated budget, then general credits, then a promotional grant,
+  at configured conversion rates.
+- **Append-only ledger.** Consumption writes a ledger entry; reversal writes a matching storno; drained wallets are
+  moved to an archive.
+- **Sliding windows.** A limit such as "200 a day" is computed from the consumption inside a sliding window; no reset
+  job is needed.
+- **Several subjects.** A licence can belong to a user, an organisation, a device or a location; one call resolves all
+  of them, together with the groups each one is a member of.
 
 ## As a permissions layer
 
-`allowances_django.permissions.AllowancesBackend` answers Django's permission checks from grant wallets, so everything that calls `has_perm` — views, templates, the admin, DRF — reads them. It does what `django.contrib.auth` permissions do not:
+`allowances_django.permissions.AllowancesBackend` answers Django's permission checks from grant wallets, so `has_perm`
+callers (views, templates, the admin, DRF) use them. Compared with `django.contrib.auth` permissions it adds:
 
-- **Rights that end.** A grant has `valid_from` and `valid_until` and stops counting on its own, without a cleanup job.
-- **Groups of groups, and groups that are not `auth.Group`.** Any model can be a group — a department, an organisation, a club — nested to any depth; a membership that would form a cycle is rejected.
-- **Rights held by anything.** A device, an organisation or a club membership holds and inherits rights as a user does.
-- **Rights that are bought, come with a plan or are used up.** A right is a wallet, so `plan_switch` and purchases grant it like a quota, and a right can allow *n* uses.
-- **A record of use and of origin.** `fulfill` writes each use to the ledger with its actor; `effective_allowances` lists every right and balance with the subject or group it comes from.
+- **Expiring rights.** A grant has `valid_from` and `valid_until` and is not counted outside that range; no cleanup job
+  is needed.
+- **Nested groups of any model.** Any model can be a group (a department, an organisation, a club), nested to any depth;
+  a membership that would form a cycle is rejected.
+- **Rights held by any subject.** A device, an organisation or a club membership holds and inherits rights as a user
+  does.
+- **Bought, plan-bound and countable rights.** A right is a wallet, so `plan_switch` and purchases grant it like a
+  quota, and a right can allow *n* uses.
+- **Use and origin records.** `fulfill` writes each use to the ledger with its actor; `effective_allowances` lists
+  every right and balance with the subject or group it comes from.
 
 ```python
 # settings.py
@@ -135,7 +160,9 @@ effective_permissions(effective_allowances(user))
 #                                   depth=1, balance=Decimal("1.000000"))]}
 ```
 
-`effective_allowances` returns everything the user holds, budgets and rights alike, in the library's terms; `effective_permissions` keeps the Django permissions. The backend works alone or chained after `ModelBackend`. It has no object-level permissions, no deny rules and no admin UI for granting.
+`effective_allowances` returns every wallet the user and its groups hold, budgets and rights alike, as `Allowance`
+objects; `effective_permissions` keeps the Django permissions. The backend works alone or chained after
+`ModelBackend`. It has no object-level permissions, no deny rules and no admin UI for granting.
 
 - [Permissions quick start](https://docs.velis.si/allowances/guide/permissions-quick-start)
 - [Rights and permissions, and how they compare with Django's](https://docs.velis.si/allowances/guide/permissions)
@@ -151,11 +178,14 @@ npm install
 npm run docs:dev
 ```
 
-No database server required: the suite defaults to a file-backed SQLite. Copy `tests/env.example.py` to `tests/env.py` to point it at a local Postgres instead, and `ALLOWANCES_TEST_DB=sqlite uv run pytest` to go back. Both engines are supported and both are covered — including `tests/django/test_concurrency.py`, which races eight threads for the same wallet and insists it is granted exactly once.
+The suite uses a file-backed SQLite database by default. `tests/env.py` (copied from `tests/env.example.py`) selects a
+local Postgres; `ALLOWANCES_TEST_DB=sqlite` forces SQLite. Both databases are supported.
+`tests/django/test_concurrency.py` runs eight threads against one wallet and asserts it is granted exactly once.
 
-Locally that runs against whichever Django you have installed. CI runs the suite five times — Django 5.2 on Python 3.11, 6.0 on 3.12 and 6.1 on 3.13 against Postgres, plus each end of that range against SQLite — which is what the `Django>=5.2,<7` pin is based on.
+Supported: Django 5.2 to 6.x (`Django>=5.2,<7`). Local runs use the installed Django. CI tests Django 5.2 on Python
+3.11, 6.0 on 3.12 and 6.1 on 3.13 on Postgres, and 5.2 on 3.11 and 6.1 on 3.13 on SQLite.
 
-`DECISIONS.md` records every judgment call and what it would cost to revisit — read it before changing behaviour.
+`DECISIONS.md` records design decisions and their consequences; read it before changing behaviour.
 
 ## Licence
 

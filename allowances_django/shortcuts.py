@@ -1,16 +1,16 @@
 """
-The API a Django application actually calls.
+Engine functions for Django applications.
 
-Same functions as :mod:`allowances.engine`, minus the ceremony: the store and the definition
-provider are supplied for you, and subjects are the model instances you already have rather than
-references you have to construct.
+Same functions as :mod:`allowances.engine`, with a default store (:class:`DjangoStore`) and
+definition provider (``settings.ALLOWANCES`` plus the ``perm:`` permission features); subjects are
+model instances (or ``SubjectRef``).
 
     from allowances_django.shortcuts import fulfill
 
     result = fulfill("send_email", 1, {"user": request.user, "team": team})
 
-Pass ``store=`` or ``provider=`` to override either — a second database, or per-tenant definitions
-assembled at request time.
+``store=`` and ``provider=`` replace the defaults, e.g. for a second database or per-tenant
+definitions.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def peek(
     at: datetime | None = None,
     store: DjangoStore | None = None,
 ) -> FulfillmentResult:
-    """Would this request succeed? Writes nothing, reserves nothing."""
+    """Return what ``fulfill`` would grant, without writing or reserving anything."""
     return engine.peek(get_store(store), feature, quantity, subject_refs(subjects), get_provider(provider), at)
 
 
@@ -73,8 +73,9 @@ def fulfill(
 ) -> FulfillmentResult:
     """
     Consume the licence. Raises :class:`allowances.errors.InsufficientBalanceError` and rolls back
-    if the request cannot be met in full, unless ``allow_partial=True``. ``actor`` is the model
-    instance recorded on the entries; without it, the only subject in ``subjects`` is the actor.
+    if the request cannot be met in full, unless ``allow_partial=True``. ``actor`` (a model instance)
+    is recorded on the entries; without it, the actor is the subject when ``subjects`` has a single
+    entry, otherwise none.
     """
     return engine.fulfill(
         get_store(store),
@@ -90,7 +91,7 @@ def fulfill(
 
 
 def attach(guid: uuid.UUID, obj, *, store: DjangoStore | None = None) -> None:
-    """Record which object the fulfillment under ``guid`` paid for."""
+    """Record which object the fulfilment under ``guid`` paid for."""
     engine.attach(get_store(store), guid, object_ref(obj))
 
 
@@ -114,7 +115,8 @@ def credit(
 ) -> Transaction:
     """
     Add ``amount`` to a wallet as a ``GRANT`` ledger entry. ``wallet`` is a wallet, a wallet row or
-    its id; ``obj`` is the model instance that paid for it, ``actor`` the one it was made for.
+    its id; ``obj`` is the model instance that paid for it, ``actor`` the model instance on whose
+    behalf it was made.
     """
     return engine.credit(
         get_store(store),
@@ -140,7 +142,7 @@ def transfer(
 ) -> FulfillmentResult:
     """
     Move ``amount`` from one wallet to another of the same currency, as a ``TRANSFER`` debit and
-    credit under one fulfillment record. Wallets are wallets, wallet rows or ids; ``obj`` and
+    credit under one fulfilment record. Wallets are wallets, wallet rows or ids; ``obj`` and
     ``actor`` are model instances. Raises :class:`allowances.errors.InsufficientBalanceError` when
     the source does not hold ``amount``.
     """
@@ -170,7 +172,7 @@ def adjust_wallet(wallet, allotment, *, at: datetime | None = None, store: Djang
 
 
 def consumed(wallet, since: datetime, until: datetime, *, store: DjangoStore | None = None):
-    """Net amount drawn from ``wallet`` in ``[since, until]`` — what a postpaid budget bills."""
+    """Net amount drawn from ``wallet`` in ``[since, until]``."""
     return engine.consumed(get_store(store), _wallet_id(wallet), since, until)
 
 
@@ -208,12 +210,12 @@ def cancel_scheduled_switch(subjects: dict, *, store: DjangoStore | None = None)
 
 
 def archive_expired_wallets(at: datetime | None = None, *, store: DjangoStore | None = None) -> int:
-    """Sweep wallets past their ``valid_until`` into the archive. Meant for a periodic job."""
+    """Archive wallets whose ``valid_until`` has passed. Returns how many were archived."""
     return engine.archive_expired_wallets(get_store(store), at)
 
 
 def find_unattached_fulfillment_records(older_than: datetime | None = None, *, store: DjangoStore | None = None):
-    """Records with a consumption entry that never got a domain object attached — candidates for recovery."""
+    """Fulfilment records with a consumption entry that has no domain object attached."""
     return engine.find_unattached_fulfillment_records(get_store(store), older_than)
 
 

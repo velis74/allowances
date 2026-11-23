@@ -1,6 +1,7 @@
 # Credits and budgets
 
-A plan is one way to fund a wallet. Others are common enough to have recipes: credits a customer buys up front, a budget a customer may spend beyond the plan and is billed for afterwards, and money handed from one wallet to another. All three use the same pieces:
+A plan is one way to fund a wallet. This page has recipes for three others: prepaid credits, a postpaid budget billed
+after use, and transfers between wallets. All three use these functions:
 
 | | |
 | --- | --- |
@@ -13,7 +14,8 @@ A plan is one way to fund a wallet. Others are common enough to have recipes: cr
 | `effective_allowances(subject)` | Lists every wallet a subject holds, its own and its groups', with the effective balance — see [What a subject holds](/guide/concepts#what-a-subject-holds). |
 | `(wallet_type, subject, source)` steps | Orders wallets of one subject and currency by where they came from. |
 
-The library holds and enforces balances. Charging a card, issuing an invoice and deciding prices stay in the host application; these recipes show where the two meet.
+The library holds and enforces balances. Charging a card, issuing an invoice and setting prices are done by the host
+application.
 
 ## Prepaid credits
 
@@ -38,11 +40,20 @@ def credits_purchased(user, payment):
         credit(pack, payment.credits, obj=payment)
 ```
 
-Each purchase is its own wallet. That gives every pack its own expiry: pass `valid_until` in the spec for credits that lapse (a year after purchase, say), leave it out for credits that never do. Within a fulfillment step the engine draws the soonest-expiring wallet first and wallets without `valid_until` last, so a lapsing pack is spent before a permanent one, and plan credits with a `valid_until` before both. A spent pack is archived like any drained wallet; an expired one by `archive_expired_wallets`.
+Each purchase is its own wallet. That gives every pack its own expiry: pass `valid_until` in the spec for credits that
+expire (for example a year after purchase); omit it for credits that do not expire. Within a fulfilment step, each
+subject's wallets are drawn soonest `valid_until` first and wallets without `valid_until` last, so a pack that expires
+is spent before a permanent one; plan credits with a `valid_until` are ordered with the packs by that date. In a step
+that covers several subjects (for example the user and its groups), the subjects are walked in order and the expiry
+order applies within each one. A spent pack is archived like any drained wallet; an expired one by
+`archive_expired_wallets`.
 
-Opening the wallet empty and crediting it books the funding in the ledger, attached to the payment, so "where did these credits come from" is a query rather than a guess.
+Opening the wallet empty and crediting it writes the funding to the ledger as a `grant` entry attached to the payment,
+so the origin of each pack's credits can be queried.
 
-A feature draws from packs by accepting their currency; no separate step is needed. To spend plan credits before any pack regardless of expiry — needed when the plan credits are a [windowed](/guide/sliding-windows) wallet, which has no `valid_until` — split by source:
+A feature draws from packs by accepting their currency; no separate step is needed. To spend plan credits before any
+pack regardless of expiry — needed when the plan credits are a [windowed](/guide/sliding-windows) wallet, which has no
+`valid_until` — split by source:
 
 ```python
 "fulfillment_order": [
@@ -51,15 +62,21 @@ A feature draws from packs by accepting their currency; no separate step is need
 ],
 ```
 
-**Refunds.** Pass a `guid` to `credit` and the purchase can be reversed with `unfulfill(guid)`. The storno takes the full amount back out of the pack, so a pack that has been partly spent ends below zero, and a pack spent out has been archived and its storno is skipped; whether to refund only the unspent part is a commercial decision, and `effective_balance` of the pack is the number to make it with.
+**Refunds.** Pass a `guid` to `credit` and the purchase can be reversed with `unfulfill(guid)`. The storno takes the
+full amount back out of the pack, so a pack that has been partly spent ends below zero, and a pack spent out has been
+archived and its storno is skipped; to refund only the unspent part, read `effective_balance` of the pack. The refund
+policy is up to the host application.
 
-**Plan credits combined with packs.** Give the plan's credits `on_switch=SwitchPolicy.TOP_UP` and an upgrade adds the difference to them; the packs are never touched. See [switch policies](/guide/plans-and-archival#switch-policies).
+**Plan credits combined with packs.** Give the plan's credits `on_switch=SwitchPolicy.TOP_UP` and an upgrade adds the
+difference to them; the packs are not changed. See [switch policies](/guide/plans-and-archival#switch-policies).
 
 ## Monthly plan credits
 
-Credits a plan grants every billing period are a per-period allotment. Two shapes, depending on whether unused credits carry over:
+Credits a plan grants every billing period are a per-period allotment. Two shapes, depending on whether unused credits
+carry over:
 
-**They don't carry over.** A windowed wallet with a monthly `reset_config` refills itself at the start of each period, with nothing running on the day:
+**They don't carry over.** A windowed wallet with a monthly `reset_config` starts each period with its full allotment;
+no scheduled job is needed:
 
 ```python
 WalletSpec(
@@ -69,7 +86,8 @@ WalletSpec(
 )
 ```
 
-**They carry over.** A stored-balance plan wallet with `on_switch=SwitchPolicy.TOP_UP`, credited by the billing job at the start of each period. Under `top_up` a plan switch keeps the wallet, and with it the carried-over credits:
+**They carry over.** A stored-balance plan wallet with `on_switch=SwitchPolicy.TOP_UP`, credited by the billing job at
+the start of each period. Under `top_up` a plan switch keeps the wallet, and with it the carried-over credits:
 
 ```python
 credit(plan_wallet, Decimal("1000"), obj=invoice)
@@ -77,7 +95,8 @@ credit(plan_wallet, Decimal("1000"), obj=invoice)
 
 ## Postpaid budget
 
-The plan includes 300 requests a month. Beyond that the customer may spend up to a limit they set, and the application bills what was used at the end of the month.
+The plan includes 300 requests a month. Beyond that the customer may spend up to a limit they set, and the application
+bills what was used at the end of the month.
 
 The included amount and the budget are two wallets of the same currency, told apart by source:
 
@@ -118,9 +137,12 @@ budget = open_wallet(
 },
 ```
 
-`fulfill` spends the included 300 first and the budget after it. When both are exhausted it raises `InsufficientBalanceError`, which is the spending limit doing its job.
+`fulfill` spends the included 300 first and the budget after it. When both are exhausted it raises
+`InsufficientBalanceError`: the customer has reached the budget limit.
 
-**The customer changes the limit.** `adjust_wallet(budget, Decimal("5000"))`. On a windowed budget this sets the new monthly limit and keeps what was already used this month; a limit lowered below current usage refuses further requests until the next month. A limit of zero turns overage off.
+**The customer changes the limit.** `adjust_wallet(budget, Decimal("5000"))`. On a windowed budget this sets the new
+monthly limit and keeps what was already used this month; a limit lowered below current usage refuses further requests
+until the next month. A limit of zero turns overage off.
 
 **Billing.** At the end of the period, the amount to charge is what was drawn from the budget wallet:
 
@@ -131,13 +153,17 @@ used = consumed(budget, period_start, period_end)
 invoice_line(user, quantity=used, unit_price=PRICE_PER_REQUEST)
 ```
 
-`consumed` counts consumption and deducts its reversals, so a request refunded with `unfulfill` within the period is not billed. A reversal booked in a later period reduces that period's figure instead.
+`consumed` counts consumption and deducts its reversals, so a request refunded with `unfulfill` within the period is not
+billed. A reversal booked in a later period reduces that period's figure instead.
 
-**Plan changes.** The budget has source `"budget"`, so `plan_switch` leaves it — and its limit — alone. Only the included amount changes with the plan; under `adjust` it keeps this month's usage, so a switch mid-month does not hand out a fresh 300.
+**Plan changes.** The budget has source `"budget"`, so `plan_switch` changes neither the wallet nor its limit. Only the
+included amount follows the plan; under `adjust` it keeps this month's usage, so a switch in mid-month does not reset
+the used amount to 0.
 
 ## Moving money between wallets
 
-A tour guide holds a budget for the trip and gives each tourist 10 EUR of it to spend on their own. The tourist's money is a wallet of its own, funded from the guide's:
+A tour guide holds a budget for the trip and gives each tourist 10 EUR of it to spend on their own. The tourist's money
+is a wallet of its own, funded from the guide's:
 
 ```python
 from decimal import Decimal
@@ -159,11 +185,16 @@ def hand_out(guide_budget, tourist, guide):
     return pocket
 ```
 
-Opening and funding run in one transaction: when the guide's budget holds less than 10 EUR, `transfer` raises `InsufficientBalanceError` and the empty wallet is rolled back with it. With the core engine the same block is `with store.unit_of_work():`, which nests the same way.
+Opening and funding run in one transaction: when the guide's budget holds less than 10 EUR, `transfer` raises
+`InsufficientBalanceError` and the empty wallet is rolled back with it. With the core engine the same block is `with
+store.unit_of_work():`, which nests the same way.
 
-`transfer` never draws on overdraft: the source must hold the amount. Both wallets must be in the same currency; their types may differ. The ledger shows a `transfer` entry of −10 on the budget and +10 on the tourist's wallet, both with the guide as actor, so where every tourist's money came from is a query.
+`transfer` never draws on overdraft: the source must hold the amount. Both wallets must be in the same currency; their
+types may differ. The ledger shows a `transfer` entry of −10 on the budget and +10 on the tourist's wallet, both with
+the guide as actor.
 
-**Returning what is left.** At the end of the trip the unspent money goes back with another transfer, in the opposite direction:
+**Returning what is left.** At the end of the trip the unspent money goes back with another transfer, in the opposite
+direction:
 
 ```python
 from django.db import transaction
@@ -185,6 +216,10 @@ def settle(pocket, guide_budget, guide):
         close_wallet(current)
 ```
 
-A tourist spending in the meantime leaves the pocket holding less than `left`; `transfer` then raises `InsufficientBalanceError` and nothing is written, so the call can be repeated.
+A tourist spending in the meantime leaves the pocket holding less than `left`; `transfer` then raises
+`InsufficientBalanceError` and nothing is written, so the call can be repeated.
 
-`unfulfill(result.guid)` also reverses a transfer, but only while the target still holds the whole amount (counting what the same record gives back to it) and the source is live — see [Reversing a transfer](/guide/reversals#reversing-a-transfer). A transfer is complete when it is written: it needs no `attach`, and the recovery sweep never reports it.
+`unfulfill(result.guid)` also reverses a transfer, but only while the target still holds the whole amount (counting what
+the same record gives back to it) and the source is live — see [Reversing a
+transfer](/guide/reversals#reversing-a-transfer). A transfer is complete when it is written: it needs no `attach`, and
+the recovery sweep never reports it.

@@ -1,4 +1,4 @@
-"""``allowances.W001`` — the one deployment check the app registers."""
+"""``allowances.W001``: the SQLite transaction mode deployment check."""
 
 from unittest import mock
 
@@ -17,8 +17,9 @@ def sqlite(**options):
 
 def run(databases):
     """
-    Patch the setting rather than ``override_settings``, which tears down live connections and
-    warns about it. The check only ever reads ``settings.DATABASES``.
+    Run the check with ``settings.DATABASES`` patched to ``databases``.
+
+    ``override_settings`` would close live connections and warn about it.
     """
     with mock.patch.object(settings, "DATABASES", databases):
         return check_sqlite_transaction_mode(app_configs=None)

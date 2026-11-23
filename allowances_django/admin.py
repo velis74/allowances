@@ -1,9 +1,9 @@
 """
-Read-mostly admin for inspecting the ledger.
+Admin for the ledger.
 
-Balances are meant to move through :mod:`allowances_django.shortcuts`, which writes a transaction
-for every change. Editing a balance directly in the admin leaves no trace of why it moved, so the
-transaction and archive tables are registered read-only — visible for support work, not editable.
+Transactions, memberships and the archive tables cannot be added or changed in the admin; deletion
+is allowed. Wallets, fulfilment records and licence modifiers are editable. A balance edited here
+has no ledger entry; :mod:`allowances_django.shortcuts` writes a transaction for every change.
 """
 
 from django.contrib import admin
@@ -63,7 +63,7 @@ class TransactionAdmin(admin.ModelAdmin):
 
 @admin.register(Membership)
 class MembershipAdmin(admin.ModelAdmin):
-    """Read-only: memberships change through ``add_member`` and ``remove_member``, which reject cycles."""
+    """No add or change: memberships change through ``add_member`` and ``remove_member``, which reject cycles."""
 
     list_display = ("id", "member", "group", "created_at")
     search_fields = ("member_type", "member_id", "group_type", "group_id")

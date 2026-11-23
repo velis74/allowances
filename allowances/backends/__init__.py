@@ -1,4 +1,5 @@
-"""Storage backends shipped with the core. See ``docs/backends/`` for writing your own."""
+"""Storage backends shipped with the core. The Store contract for other backends is in
+``docs/backends/writing-a-backend.md``."""
 
 from allowances.backends.memory import MemoryStore
 

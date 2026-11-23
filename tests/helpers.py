@@ -1,8 +1,6 @@
 """
-The few things tests need that the Store port deliberately doesn't expose.
-
-Seeding modifiers and counting rows are not the engine's business, so they are not on the port —
-but assertions need them, and they have to work against either backend.
+Test helpers for operations the Store port does not expose (seeding cost modifiers, counting and
+reading rows), implemented for both ``MemoryStore`` and the Django store.
 """
 
 from decimal import Decimal
@@ -15,7 +13,7 @@ def _is_memory(store) -> bool:
 
 
 def add_modifier(store, *, subject, feature, factor, valid_from=None, valid_until=None):
-    """Seed a cost modifier. Applications create these themselves; the engine only reads them."""
+    """Create a cost modifier in the store."""
     if _is_memory(store):
         return store.add_modifier(
             subject=subject,
@@ -78,7 +76,7 @@ def archived_transaction_amounts(store, wallet_id) -> list:
 
 
 def wallets_for_subject(store, subject) -> list:
-    """Every wallet a subject holds, valid or not — ``find_wallets`` only returns valid ones."""
+    """Return every wallet a subject holds, by id, valid or not (``find_wallets`` returns only valid ones)."""
     if _is_memory(store):
         return sorted((w for w in store._wallets.values() if w.subject == subject), key=lambda w: w.id)
     from allowances_django.models import Wallet

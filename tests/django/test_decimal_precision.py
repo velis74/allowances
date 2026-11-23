@@ -1,13 +1,13 @@
 """
-The decimal range both engines agree on.
+The decimal range both engines store exactly.
 
 Postgres stores `DecimalField` exactly, to all twenty digits the column allows. SQLite stores it
-as a float and Django rounds back to the field's six decimal places, which is exact to about
-fifteen significant digits and lossy beyond — silently at first, then as `decimal.InvalidOperation`
-once the rounded value no longer fits the column at all.
+as a float and Django rounds it back to the field's six decimal places, which is exact to about
+fifteen significant digits. Larger values lose precision, or raise `decimal.InvalidOperation` when
+the rounded value exceeds the column.
 
-Nine integer digits plus six decimals is where the two engines still say the same thing, so that
-is the range the library documents. This test is what stops that claim from drifting.
+Both engines store nine integer digits plus six decimals exactly; this is the range the library
+documents.
 """
 
 from decimal import Decimal
@@ -21,7 +21,7 @@ from tests.conftest import CREDITS, provider_with
 
 pytestmark = pytest.mark.django_db
 
-#: The largest amount every supported engine represents exactly, and neighbours worth pinning.
+#: Values every supported engine stores exactly, including the largest (999999999.999999).
 EXACT = ["0.000001", "1.5", "999999999.999999", "123456789.123456", "0.123456"]
 
 
@@ -43,7 +43,7 @@ def test_balances_round_trip_exactly(value):
 
 
 def test_arithmetic_stays_exact_at_the_top_of_the_range():
-    """Not just storage: a draw at the boundary leaves the exact remainder, not a float's guess."""
+    """A draw at the top of the range leaves the exact decimal remainder."""
     wallet = open_wallet("999999999.999999")
     provider = provider_with(
         features={

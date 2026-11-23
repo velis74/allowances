@@ -1,8 +1,6 @@
 """
-Translating between Django model instances and the core's :class:`~allowances.types.SubjectRef`.
-
-Application code passes real objects — a ``User``, an ``Organisation``. The core only ever handles
-``("auth.user", "42")``. This module is the seam.
+Conversion between Django model instances and the core's :class:`~allowances.types.SubjectRef` /
+:class:`~allowances.types.ObjectRef` (``("auth.user", "42")``), and back.
 """
 
 from __future__ import annotations
@@ -15,8 +13,8 @@ from allowances.types import ObjectRef, SubjectRef
 
 def subject_ref(obj) -> SubjectRef:
     """
-    A :class:`~allowances.types.SubjectRef` for a model instance. Already-converted refs pass
-    through, so callers can mix the two freely.
+    A :class:`~allowances.types.SubjectRef` for a model instance. A ``SubjectRef`` is returned
+    unchanged.
     """
     if isinstance(obj, SubjectRef):
         return obj
@@ -28,7 +26,10 @@ def subject_ref(obj) -> SubjectRef:
 
 
 def object_ref(obj) -> ObjectRef:
-    """The same conversion for the domain object a fulfillment paid for."""
+    """
+    An :class:`~allowances.types.ObjectRef` for the domain object a fulfilment paid for. An
+    ``ObjectRef`` is returned unchanged.
+    """
     if isinstance(obj, ObjectRef):
         return obj
     if not isinstance(obj, Model):
@@ -39,17 +40,15 @@ def object_ref(obj) -> ObjectRef:
 
 
 def subject_refs(subjects: dict | None) -> dict:
-    """Convert a whole ``{name: instance}`` mapping in one go."""
+    """Convert a ``{name: instance}`` mapping with :func:`subject_ref`."""
     return {name: subject_ref(obj) for name, obj in (subjects or {}).items()}
 
 
 def resolve(ref: SubjectRef | ObjectRef):
     """
-    Fetch the actual object behind a reference, or ``None`` if it is gone.
+    The object behind a reference, or ``None`` when its model or row does not exist.
 
-    Since these references are not database-enforced, a subject really can be deleted out from
-    under its wallets. Returning ``None`` rather than raising lets reporting and admin views render
-    an orphaned row instead of falling over on it.
+    References are not foreign keys: a subject can be deleted while its wallets remain.
     """
     app_label, _, model_name = ref.type.partition(".")
     try:

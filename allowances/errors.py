@@ -9,26 +9,24 @@ if TYPE_CHECKING:
 
 
 class AllowancesError(Exception):
-    """Base class for everything this library raises, so callers can catch one thing."""
+    """Base class of every exception this library raises."""
 
 
 class DefinitionNotFoundError(AllowancesError, KeyError):
-    """A provider was asked for a feature or currency it doesn't know about."""
+    """A provider has no definition for the requested feature or currency."""
 
 
 class RecordNotFoundError(AllowancesError, LookupError):
     """
-    No fulfillment record exists for the given guid.
+    No fulfilment record exists for the given guid. Raised by ``attach`` and ``unfulfill``.
 
-    Distinct from the no-op that ``unfulfill`` performs on an *already reversed* record: that is a
-    legitimate repeat call, whereas a guid nobody ever fulfilled under means the caller has lost
-    track of which operation it was undoing.
+    ``unfulfill`` on an already reversed record does not raise; it is a no-op.
     """
 
 
 class WalletNotFoundError(AllowancesError, LookupError):
     """
-    No live wallet exists with the given id — it was never opened, or it has been archived. Also raised
+    No live wallet exists with the given id: it was never opened, or it has been archived. Also raised
     by ``unfulfill`` for a transfer whose source wallet has been archived.
     """
 
@@ -50,8 +48,8 @@ class InsufficientBalanceError(AllowancesError):
 
     Carries a :class:`~allowances.types.FulfillmentResult`: for ``fulfill`` the one that *would* have
     been returned had ``allow_partial=True`` been passed, for a transfer or its reversal the amount
-    requested and the amount available. ``transactions`` is empty — nothing was persisted, the whole
-    call is rolled back.
+    requested and the amount available. ``transactions`` is empty: the call is rolled back and
+    nothing is persisted.
     """
 
     def __init__(self, result: FulfillmentResult):
@@ -68,10 +66,8 @@ class MembershipCycleError(AllowancesError):
 
 class UnsupportedOperationError(AllowancesError, NotImplementedError):
     """
-    A backend was asked for something it deliberately does not implement.
+    A backend does not implement the requested operation.
 
-    Not every store can do everything — an append-only or cache-shaped backend may have no archive
-    to move wallets into, and no way to answer a scan like
-    ``records_with_unattached_transactions``. Raising this (rather than silently doing nothing)
-    keeps the gap visible. See ``docs/backends/writing-a-backend.md``.
+    Example: a backend without an archive raises it from ``archive_wallet``, one without the scan
+    from ``records_with_unattached_transactions``. See ``docs/backends/writing-a-backend.md``.
     """
