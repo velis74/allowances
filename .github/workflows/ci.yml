@@ -118,6 +118,10 @@ jobs:
         uses: velis74/incremental-coverage-check@v3
         with:
           coverage-files: coverage.json
+          # Lint and docs tooling: no test measures it.
+          extra-ignore-patterns: |
+            scripts/**
+            docs/**
           base-ref: ${{ github.base_ref }}
           head-ref: HEAD
           github-token: ${{ secrets.GITHUB_TOKEN }}
