@@ -1,465 +1,222 @@
 """
-The Django ORM implementation of :class:`allowances.store.Store`.
+The Django ORM store for the asynchronous API, :class:`DjangoStore`.
 
-The engine (fulfilment order, overdraft, rounding, window arithmetic) does not depend on this
-module and works with any ``Store`` implementation.
+Django has no asynchronous form of ``transaction.atomic`` or ``select_for_update``, and a Django connection
+belongs to one thread. The store therefore runs its queries (:class:`~allowances_django.queries.DjangoQueries`)
+on threads:
+
+- Outside a unit of work a call runs like Django's asynchronous ORM methods (``aget``, ``afirst`` ...):
+  through ``sync_to_async`` on Django's thread-sensitive executor, in autocommit.
+- The outermost ``async with store.unit_of_work()`` starts a thread of its own. ``atomic()`` is entered and
+  exited on it, every store call made inside the block (from any ``DjangoStore`` instance, nested blocks
+  included) runs on it, and the thread's connections are closed when the block ends. Concurrent units of work
+  in one process run on separate threads, with separate connections and transactions.
+- Tasks created inside a unit of work (``asyncio.gather``, ``create_task``) share its transaction. Their nested
+  blocks are savepoints that run one after another; while one is open, operations and blocks of other tasks wait
+  until it ends.
+
+Each unit of work opens a database connection; a connection pool (Django's ``"pool"`` option for psycopg)
+keeps that cheap. Units of work run as parallel as threads allow; the store does not do asynchronous I/O.
+Asynchronous I/O is the adorm store, ``allowances_adorm.store.AdormStore``.
+
+The store needs a running event loop. :mod:`allowances.sync` uses
+:class:`allowances_django.sync.store.DjangoStore`.
 """
 
 from __future__ import annotations
 
-import uuid
+import asyncio
+import contextvars
+import functools
 
-from datetime import datetime
-from decimal import Decimal
-from typing import Sequence
+from concurrent.futures import ThreadPoolExecutor
 
-from django.core.exceptions import ValidationError
-from django.db import connections, IntegrityError, OperationalError, transaction as db_transaction
-from django.db.models import Q, Sum
+from asgiref.sync import sync_to_async
+from django.db import connections
 
-from allowances.types import (
-    FulfillmentRecord as CoreRecord,
-    ObjectRef,
-    PLAN_SOURCE,
-    SubjectRef,
-    Transaction as CoreTransaction,
-    TransactionKind,
-    Wallet as CoreWallet,
-    WalletType,
-)
-from allowances_django.models import (
-    AllowancesLock,
-    FulfillmentRecord,
-    LicenseModifier,
-    Membership,
-    Transaction,
-    TransactionArchive,
-    Wallet,
-    WalletArchive,
+from allowances.errors import StoreSuspendedError
+from allowances_django.queries import (  # noqa: F401  (re-exported row converters)
+    DjangoQueries,
+    MEMBERSHIP_LOCK_NAME,
+    to_record,
+    to_transaction,
+    to_wallet,
 )
 
-#: Name of the :class:`~allowances_django.models.AllowancesLock` row that serialises membership changes.
-MEMBERSHIP_LOCK_NAME = "membership"
+
+class _UnitOfWorkThread:
+    """
+    The thread that runs one outermost unit of work and every store call inside it.
+
+    Tasks created inside the unit of work share it. ``top`` is the innermost open block; only operations and
+    blocks of that block's context run, others wait until it ends, so savepoints of concurrent tasks never
+    interleave.
+    """
+
+    def __init__(self):
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="allowances-unit-of-work")
+        self.closed = False
+        self.top = _Block(self, None)
+        self._top_changed = asyncio.Event()
+
+    async def call(self, function, *args, **kwargs):
+        return await sync_to_async(function, thread_sensitive=False, executor=self.executor)(*args, **kwargs)
+
+    async def wait_turn(self, block: _Block) -> None:
+        """Wait until ``block`` is the innermost open block."""
+        while self.top is not block:
+            await self._top_changed.wait()
+
+    async def push(self, parent: _Block) -> _Block:
+        """Open a block nested in ``parent`` once ``parent`` is the innermost open block."""
+        await self.wait_turn(parent)
+        self.top = _Block(self, parent)
+        return self.top
+
+    def pop(self, block: _Block) -> None:
+        """Close ``block`` and wake the operations waiting for its parent."""
+        self.top = block.parent
+        changed, self._top_changed = self._top_changed, asyncio.Event()
+        changed.set()
+
+    def close(self):
+        """Close the thread's connections after the queued work, then let the thread end."""
+        self.closed = True
+        future = self.executor.submit(connections.close_all)
+        self.executor.shutdown(wait=False)
+        return future
 
 
-def _validity_q(at: datetime) -> Q:
-    """Rows valid at ``at``: ``valid_from`` empty or not after it, ``valid_until`` empty or after it."""
-    return (Q(valid_from__isnull=True) | Q(valid_from__lte=at)) & (Q(valid_until__isnull=True) | Q(valid_until__gt=at))
+class _Block:
+    """One open ``unit_of_work`` block; ``parent`` is ``None`` for the outermost one."""
+
+    __slots__ = ("thread", "parent")
+
+    def __init__(self, thread: _UnitOfWorkThread, parent: _Block | None):
+        self.thread = thread
+        self.parent = parent
 
 
-def _subject_q(subjects: Sequence[SubjectRef]) -> Q:
-    query = Q()
-    for subject in subjects:
-        query |= Q(subject_type=subject.type, subject_id=subject.id)
-    return query
+#: The unit-of-work block the current task is in, if any; tasks created inside a block inherit it.
+_current_block: contextvars.ContextVar[_Block | None] = contextvars.ContextVar(
+    "allowances_django_unit_of_work_block", default=None
+)
 
 
-def _wallet_pks(wallet_ids) -> list:
-    """The wallet ids as primary-key values (``'5'`` and ``5`` are one id); ids that cannot be one are dropped."""
-    field = Wallet._meta.pk
-    pks = set()
-    for wallet_id in wallet_ids:
+def _require_event_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        raise StoreSuspendedError(
+            "allowances_django.store.DjangoStore runs its queries on threads and needs a running event loop; "
+            "use allowances_django.sync.store.DjangoStore with allowances.sync."
+        ) from None
+
+
+async def _execute(function, *args, **kwargs):
+    """Run ``function`` on the current unit of work's thread, or through Django's ``sync_to_async``."""
+    _require_event_loop()
+    block = _current_block.get()
+    if block is None or block.thread.closed:
+        return await sync_to_async(function)(*args, **kwargs)
+    await block.thread.wait_turn(block)
+    return await block.thread.call(function, *args, **kwargs)
+
+
+class _UnitOfWork:
+    """``atomic()`` on the unit of work's thread; the outermost block owns the thread."""
+
+    def __init__(self, queries: DjangoQueries):
+        self._queries = queries
+        self._token = None
+
+    async def __aenter__(self) -> None:
+        _require_event_loop()
+        enclosing = _current_block.get()
+        if enclosing is None or enclosing.thread.closed:
+            self._block = _UnitOfWorkThread().top
+        else:
+            self._block = await enclosing.thread.push(enclosing)
+        self._token = _current_block.set(self._block)
+        self._atomic = self._queries.atomic()
         try:
-            pks.add(field.to_python(wallet_id))
-        except ValidationError:
-            continue
-    return list(pks)
+            await self._block.thread.call(self._atomic.__enter__)
+        except BaseException:
+            # Not awaited: the block may be abandoned (cancelled, or closed by allowances.sync). Closing the
+            # connection after a pending __enter__ rolls its transaction back.
+            self._release()
+            raise
+
+    async def __aexit__(self, exc_type, exc, traceback) -> bool:
+        thread = self._block.thread
+        try:
+            await thread.wait_turn(self._block)
+            return bool(await thread.call(self._atomic.__exit__, exc_type, exc, traceback))
+        finally:
+            closing = self._release()
+            if closing is not None:
+                await asyncio.wrap_future(closing)
+
+    def _release(self):
+        """Leave the block: the outermost one closes the thread (returns its future), a nested one is popped."""
+        _current_block.reset(self._token)
+        thread = self._block.thread
+        if self._block.parent is None:
+            return thread.close()
+        thread.pop(self._block)
+        return None
 
 
-def _locked(qs):
-    """
-    Lock the selected rows with ``SELECT ... FOR UPDATE`` where the backend supports it; otherwise
-    return the queryset unchanged.
+def _on_thread(method):
+    """A coroutine method that runs the :class:`DjangoQueries` method ``method`` with :func:`_execute`."""
 
-    SQLite relies on its database-wide write lock, taken at ``BEGIN`` with ``transaction_mode:
-    "IMMEDIATE"`` (check ``allowances.W001``). Without that mode a concurrent write fails with
-    ``database is locked`` instead of waiting.
-    """
-    return qs.select_for_update() if connections[qs.db].features.has_select_for_update else qs
+    @functools.wraps(method)
+    async def call(self, *args, **kwargs):
+        return await _execute(method, self.queries, *args, **kwargs)
 
-
-def to_wallet(row: Wallet) -> CoreWallet:
-    """Row to value object."""
-    return CoreWallet(
-        id=row.pk,
-        subject=SubjectRef(row.subject_type, row.subject_id),
-        wallet_type=WalletType(row.wallet_type),
-        currency=row.currency,
-        balance=row.balance,
-        created_at=row.created_at,
-        valid_from=row.valid_from,
-        valid_until=row.valid_until,
-        overdraft_limit=row.overdraft_limit,
-        first_overdraft_at=row.first_overdraft_at,
-        reset_config=row.reset_config,
-        source=row.source,
-        allotment=row.allotment,
-        scheduled=row.scheduled,
-    )
-
-
-def to_transaction(row: Transaction, record_guid: uuid.UUID | None = None) -> CoreTransaction:
-    """Row to value object. A given ``record_guid`` is used instead of following the record foreign key."""
-    if record_guid is None and row.record_id is not None:
-        record_guid = row.record.guid
-    return CoreTransaction(
-        id=row.pk,
-        wallet_id=row.wallet_id,
-        kind=TransactionKind(row.kind),
-        amount=row.amount,
-        created_at=row.created_at,
-        record_guid=record_guid,
-        feature=row.feature,
-        storno_of_id=row.storno_of_id,
-        obj=ObjectRef(row.object_type, row.object_id) if row.object_type else None,
-        actor=SubjectRef(row.actor_type, row.actor_id) if row.actor_type else None,
-    )
-
-
-def to_record(row: FulfillmentRecord) -> CoreRecord:
-    return CoreRecord(guid=row.guid, created_at=row.created_at)
+    return call
 
 
 class DjangoStore:
     """
-    A Store over the models in ``allowances_django.models``.
+    A Store over the models in ``allowances_django.models`` for the asynchronous API; see the module
+    documentation for the execution model.
 
-    Holds no connection; caches fulfilment record guid → primary key.
+    Besides the port it has ``resolve`` and ``live_wallet_ids``, used by the Django shortcuts.
     """
 
     def __init__(self, using: str | None = None):
-        #: Database alias of the allowances tables; ``None`` for the default database.
-        self.using = using
-        self._record_ids: dict[uuid.UUID, int] = {}
+        #: The queries, on database alias ``using`` (``None``: the default database).
+        self.queries = DjangoQueries(using)
 
-    # -- helpers -------------------------------------------------------------------------------
+    @property
+    def using(self) -> str | None:
+        """Database alias of the allowances tables; ``None`` for the default database."""
+        return self.queries.using
 
-    def _qs(self, model):
-        return model.objects.using(self.using) if self.using else model.objects.all()
+    def unit_of_work(self) -> _UnitOfWork:
+        return _UnitOfWork(self.queries)
 
-    def _record_id(self, guid: uuid.UUID | None) -> int | None:
-        if guid is None:
-            return None
-        if guid not in self._record_ids:
-            row = self._qs(FulfillmentRecord).filter(guid=guid).first()
-            if row is None:
-                return None
-            self._record_ids[guid] = row.pk
-        return self._record_ids[guid]
-
-    # -- transactions / locking ----------------------------------------------------------------
-
-    def unit_of_work(self):
-        return db_transaction.atomic(using=self.using)
-
-    def lock_wallets(self, wallet_ids: Sequence[object]) -> list[CoreWallet]:
-        ids = _wallet_pks(wallet_ids)
-        if not ids:
-            return []
-        # ORDER BY under FOR UPDATE makes PostgreSQL take the row locks in ascending id order.
-        qs = _locked(self._qs(Wallet).filter(pk__in=ids).order_by("id"))
-        return [to_wallet(row) for row in qs]
-
-    # -- wallets -------------------------------------------------------------------------------
-
-    def find_wallets(
-        self,
-        *,
-        subjects: Sequence[SubjectRef],
-        wallet_types: Sequence[WalletType],
-        currencies: Sequence[str] | None,
-        at: datetime,
-        lock: bool = False,
-    ) -> list[CoreWallet]:
-        if not subjects or not wallet_types or (currencies is not None and not currencies):
-            return []
-        qs = (
-            self._qs(Wallet)
-            .filter(_subject_q(subjects))
-            .filter(wallet_type__in=[str(wallet_type) for wallet_type in wallet_types])
-            .filter(_validity_q(at))
-            .order_by("created_at", "id")
-        )
-        if currencies is not None:
-            qs = qs.filter(currency__in=list(currencies))
-        if lock:
-            qs = _locked(qs)
-        return [to_wallet(row) for row in qs]
-
-    def get_wallet(self, wallet_id: object, *, lock: bool = False) -> CoreWallet | None:
-        qs = self._qs(Wallet).filter(pk=wallet_id)
-        if lock:
-            qs = _locked(qs)
-        row = qs.first()
-        return to_wallet(row) if row else None
-
-    def save_wallet(self, wallet: CoreWallet) -> None:
-        self._qs(Wallet).filter(pk=wallet.id).update(
-            balance=wallet.balance,
-            first_overdraft_at=wallet.first_overdraft_at,
-            valid_from=wallet.valid_from,
-            valid_until=wallet.valid_until,
-            overdraft_limit=wallet.overdraft_limit,
-            reset_config=wallet.reset_config,
-            allotment=wallet.allotment,
-            scheduled=wallet.scheduled,
-        )
-
-    def create_wallet(
-        self,
-        *,
-        subject: SubjectRef,
-        wallet_type: WalletType,
-        currency: str,
-        balance: Decimal,
-        overdraft_limit: Decimal | None = None,
-        reset_config: dict | None = None,
-        valid_from: datetime | None = None,
-        valid_until: datetime | None = None,
-        source: str = PLAN_SOURCE,
-        allotment: Decimal | None = None,
-        scheduled: dict | None = None,
-    ) -> CoreWallet:
-        row = Wallet(
-            subject_type=subject.type,
-            subject_id=subject.id,
-            wallet_type=str(wallet_type),
-            currency=currency,
-            balance=Decimal(str(balance)),
-            overdraft_limit=None if overdraft_limit is None else Decimal(str(overdraft_limit)),
-            reset_config=reset_config,
-            valid_from=valid_from,
-            valid_until=valid_until,
-            source=source,
-            allotment=None if allotment is None else Decimal(str(allotment)),
-            scheduled=scheduled,
-        )
-        row.save(using=self.using)
-        return to_wallet(row)
-
-    def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[CoreWallet]:
-        qs = (
-            self._qs(Wallet)
-            .filter(subject_type=subject.type, subject_id=subject.id, scheduled__isnull=False)
-            .order_by("created_at", "id")
-        )
-        if lock:
-            qs = _locked(qs)
-        return [to_wallet(row) for row in qs]
-
-    def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[CoreWallet]:
-        qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lte=at).order_by("created_at", "id")
-        if lock:
-            qs = _locked(qs)
-        return [to_wallet(row) for row in qs]
-
-    def archive_wallet(self, wallet: CoreWallet) -> None:
-        row = self._qs(Wallet).filter(pk=wallet.id).first()
-        if row is None:
-            return
-
-        archive = WalletArchive(
-            original_wallet_id=row.pk,
-            subject_type=row.subject_type,
-            subject_id=row.subject_id,
-            wallet_type=row.wallet_type,
-            currency=row.currency,
-            final_balance=row.balance,
-            valid_from=row.valid_from,
-            valid_until=row.valid_until,
-            overdraft_limit=row.overdraft_limit,
-            first_overdraft_at=row.first_overdraft_at,
-            reset_config=row.reset_config,
-            source=row.source,
-            allotment=row.allotment,
-            original_created_at=row.created_at,
-        )
-        archive.save(using=self.using)
-
-        transactions = list(row.transactions.order_by("created_at", "id"))
-        archived_by_id = {}
-        for txn in transactions:
-            copy = TransactionArchive(
-                original_transaction_id=txn.pk,
-                wallet_archive=archive,
-                original_wallet_id=row.pk,
-                record_id=txn.record_id,
-                kind=txn.kind,
-                amount=txn.amount,
-                feature=txn.feature,
-                object_type=txn.object_type,
-                object_id=txn.object_id,
-                actor_type=txn.actor_type,
-                actor_id=txn.actor_id,
-                original_created_at=txn.created_at,
-            )
-            copy.save(using=self.using)
-            archived_by_id[txn.pk] = copy
-
-        # Storno links between archive rows, set once every archive row exists.
-        for txn in transactions:
-            if txn.storno_of_id in archived_by_id:
-                copy = archived_by_id[txn.pk]
-                copy.storno_of = archived_by_id[txn.storno_of_id]
-                copy.save(using=self.using, update_fields=["storno_of"])
-
-        # Transaction.storno_of is PROTECT, also within one cascade: delete storno rows before the wallet.
-        storno_ids = [txn.pk for txn in transactions if txn.storno_of_id]
-        if storno_ids:
-            self._qs(Transaction).filter(pk__in=storno_ids).delete()
-        row.delete()
-
-    # -- ledger --------------------------------------------------------------------------------
-
-    def sum_transactions(self, *, wallet_id: object, since: datetime, until: datetime) -> Decimal:
-        total = (
-            self._qs(Transaction)
-            .filter(wallet_id=wallet_id, created_at__gte=since, created_at__lte=until)
-            .aggregate(total=Sum("amount"))["total"]
-        )
-        return total or Decimal("0")
-
-    def transactions_for_wallet(self, *, wallet_id: object, since: datetime, until: datetime) -> list[CoreTransaction]:
-        qs = (
-            self._qs(Transaction)
-            .filter(wallet_id=wallet_id, created_at__gte=since, created_at__lte=until)
-            .select_related("record")
-            .order_by("created_at", "id")
-        )
-        return [to_transaction(row) for row in qs]
-
-    def create_transaction(
-        self,
-        *,
-        wallet_id: object,
-        kind: TransactionKind,
-        amount: Decimal,
-        record_guid: uuid.UUID | None = None,
-        feature: str = "",
-        storno_of_id: object = None,
-        at: datetime | None = None,
-        actor: SubjectRef | None = None,
-    ) -> CoreTransaction:
-        row = Transaction(
-            wallet_id=wallet_id,
-            record_id=self._record_id(record_guid),
-            kind=str(kind),
-            amount=Decimal(str(amount)),
-            feature=feature,
-            storno_of_id=storno_of_id,
-            actor_type=actor.type if actor is not None else "",
-            actor_id=actor.id if actor is not None else "",
-        )
-        if at is not None:
-            row.created_at = at
-        row.save(using=self.using)
-        return to_transaction(row, record_guid=record_guid)
-
-    def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[CoreTransaction]:
-        record_id = self._record_id(record_guid)
-        if record_id is None:
-            return []
-        # Filter on record_id, not record__guid: no join, so FOR UPDATE locks only transaction rows.
-        qs = self._qs(Transaction).filter(record_id=record_id).order_by("created_at", "id")
-        if lock:
-            qs = _locked(qs)
-        return [to_transaction(row, record_guid=record_guid) for row in qs]
-
-    def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
-        self._qs(Transaction).filter(pk__in=list(transaction_ids)).update(object_type=obj.type, object_id=obj.id)
-
-    # -- fulfilment records -------------------------------------------------------------------
-
-    def get_or_create_record(self, guid: uuid.UUID | None = None) -> CoreRecord:
-        if guid is None:
-            row = FulfillmentRecord()
-            row.save(using=self.using)
-        else:
-            row, _ = FulfillmentRecord.objects.using(self.using).get_or_create(guid=guid)
-        self._record_ids[row.guid] = row.pk
-        return to_record(row)
-
-    def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> CoreRecord | None:
-        qs = self._qs(FulfillmentRecord).filter(guid=guid)
-        if lock and connections[qs.db].features.has_select_for_no_key_update:
-            # FOR NO KEY UPDATE: archiving a wallet inserts rows referencing the record, and their
-            # foreign-key check (FOR KEY SHARE) must not wait for a lock held across lock_wallets.
-            qs = qs.select_for_update(no_key=True)
-        elif lock:
-            qs = _locked(qs)
-        row = qs.first()
-        if row is None:
-            return None
-        self._record_ids[row.guid] = row.pk
-        return to_record(row)
-
-    def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[CoreRecord]:
-        qs = (
-            self._qs(FulfillmentRecord)
-            .filter(transactions__kind=str(TransactionKind.CONSUMPTION), transactions__object_type="")
-            .distinct()
-        )
-        if older_than is not None:
-            qs = qs.filter(created_at__lte=older_than)
-        return [to_record(row) for row in qs.order_by("created_at", "id")]
-
-    # -- modifiers -----------------------------------------------------------------------------
-
-    def find_modifier_factors(self, *, feature: str, subjects: Sequence[SubjectRef], at: datetime) -> list[Decimal]:
-        if not subjects:
-            return []
-        return list(
-            self._qs(LicenseModifier)
-            .filter(feature=feature)
-            .filter(_subject_q(subjects))
-            .filter(_validity_q(at))
-            .values_list("factor", flat=True)
-        )
-
-    # -- memberships ---------------------------------------------------------------------------
-
-    def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
-        self._qs(Membership).get_or_create(
-            member_type=member.type, member_id=member.id, group_type=group.type, group_id=group.id
-        )
-
-    def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
-        deleted, _ = (
-            self._qs(Membership)
-            .filter(member_type=member.type, member_id=member.id, group_type=group.type, group_id=group.id)
-            .delete()
-        )
-        return deleted > 0
-
-    def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
-        if not members:
-            return []
-        query = Q()
-        for member in members:
-            query |= Q(member_type=member.type, member_id=member.id)
-        rows = self._qs(Membership).filter(query).order_by("created_at", "id")
-        return [(SubjectRef(row.member_type, row.member_id), SubjectRef(row.group_type, row.group_id)) for row in rows]
-
-    def lock_memberships(self) -> None:
-        """
-        Lock the ``AllowancesLock`` row ``"membership"`` with ``SELECT ... FOR UPDATE`` until the unit of
-        work ends. On SQLite, IMMEDIATE transactions serialise writers and no row is locked.
-
-        Migration 0004 creates the row; a missing row (for example after the table was flushed) is created
-        in the unit of work. When a concurrent unit of work created it and the isolation level hides it
-        (REPEATABLE READ, SERIALIZABLE), :class:`~django.db.OperationalError` is raised; a retry succeeds.
-        """
-        rows = self._qs(AllowancesLock).filter(name=MEMBERSHIP_LOCK_NAME)
-        if not connections[rows.db].features.has_select_for_update:
-            return
-        if list(rows.select_for_update().values_list("pk", flat=True)):
-            return
-        try:
-            with db_transaction.atomic(using=rows.db):
-                self._qs(AllowancesLock).create(name=MEMBERSHIP_LOCK_NAME)
-        except IntegrityError:
-            # Created by a concurrent unit of work: wait for its lock.
-            if not list(rows.select_for_update().values_list("pk", flat=True)):
-                raise OperationalError(
-                    f"AllowancesLock row {MEMBERSHIP_LOCK_NAME!r} exists but is not visible in this transaction; retry."
-                ) from None
+    lock_wallets = _on_thread(DjangoQueries.lock_wallets)
+    find_wallets = _on_thread(DjangoQueries.find_wallets)
+    get_wallet = _on_thread(DjangoQueries.get_wallet)
+    save_wallet = _on_thread(DjangoQueries.save_wallet)
+    create_wallet = _on_thread(DjangoQueries.create_wallet)
+    find_scheduled_wallets = _on_thread(DjangoQueries.find_scheduled_wallets)
+    find_expired_wallets = _on_thread(DjangoQueries.find_expired_wallets)
+    archive_wallet = _on_thread(DjangoQueries.archive_wallet)
+    sum_transactions = _on_thread(DjangoQueries.sum_transactions)
+    transactions_for_wallet = _on_thread(DjangoQueries.transactions_for_wallet)
+    create_transaction = _on_thread(DjangoQueries.create_transaction)
+    transactions_for_record = _on_thread(DjangoQueries.transactions_for_record)
+    attach_object = _on_thread(DjangoQueries.attach_object)
+    get_or_create_record = _on_thread(DjangoQueries.get_or_create_record)
+    get_record = _on_thread(DjangoQueries.get_record)
+    records_with_unattached_transactions = _on_thread(DjangoQueries.records_with_unattached_transactions)
+    find_modifier_factors = _on_thread(DjangoQueries.find_modifier_factors)
+    add_membership = _on_thread(DjangoQueries.add_membership)
+    remove_membership = _on_thread(DjangoQueries.remove_membership)
+    memberships_of = _on_thread(DjangoQueries.memberships_of)
+    lock_memberships = _on_thread(DjangoQueries.lock_memberships)
+    resolve = _on_thread(DjangoQueries.resolve)
+    live_wallet_ids = _on_thread(DjangoQueries.live_wallet_ids)

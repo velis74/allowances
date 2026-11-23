@@ -4,7 +4,8 @@ Django permissions held as grant wallets.
 A Django permission ``"app_label.codename"`` is the feature and the currency
 ``"perm:app_label.codename"``. A subject holds the permission while it has a live grant wallet in
 that currency with a positive balance; :func:`grant_permission` opens one and
-:func:`revoke_permission` closes it. Members of a group hold the group's permissions.
+:func:`revoke_permission` closes it (coroutines; :mod:`allowances_django.sync.permissions` has both as
+synchronous functions). Members of a group hold the group's permissions.
 :func:`effective_permissions` picks the permissions out of a subject's
 :func:`~allowances.engine.effective_allowances`.
 
@@ -30,10 +31,11 @@ from allowances.definitions import (
     FeatureSection,
 )
 from allowances.errors import DefinitionNotFoundError
+from allowances.store import Store
+from allowances.sync.driver import run
 from allowances.types import Allowance, Wallet, WalletSpec, WalletType
-from allowances_django.models import Wallet as WalletRow
+from allowances_django.config import default_store, default_sync_store
 from allowances_django.providers import SettingsProvider
-from allowances_django.store import DjangoStore
 from allowances_django.subjects import subject_ref
 
 #: Prefix of the feature and currency names that stand for Django permissions.
@@ -87,13 +89,13 @@ class PermissionProvider(DefinitionProvider):
         return CurrencyDefinition(name=name)
 
 
-def grant_permission(
+async def grant_permission(
     subject,
     perm: str,
     *,
     valid_from: datetime | None = None,
     valid_until: datetime | None = None,
-    store: DjangoStore | None = None,
+    store: Store | None = None,
 ) -> Wallet:
     """
     Give ``subject`` (a model instance or subject reference) the permission ``perm``: a grant
@@ -106,8 +108,8 @@ def grant_permission(
         balance=Decimal("1"),
         valid_until=valid_until,
     )
-    return engine.open_wallet(
-        store if store is not None else DjangoStore(),
+    return await engine.open_wallet(
+        default_store(store),
         subject_ref(subject),
         spec,
         source=PERMISSION_SOURCE,
@@ -115,28 +117,19 @@ def grant_permission(
     )
 
 
-def revoke_permission(subject, perm: str, *, at: datetime | None = None, store: DjangoStore | None = None) -> int:
+async def revoke_permission(subject, perm: str, *, at: datetime | None = None, store: Store | None = None) -> int:
     """
     Close, at ``at`` (default now), every live grant wallet of ``subject`` in currency
     ``perm:<perm>`` that has not ended by then. Returns how many were closed.
     """
-    store = store if store is not None else DjangoStore()
+    store = default_store(store)
     at = at or timezone.now()
-    ref = subject_ref(subject)
-    with store.unit_of_work():
-        rows = WalletRow.objects.using(store.using) if store.using else WalletRow.objects.all()
-        wallet_ids = sorted(
-            rows.filter(
-                subject_type=ref.type,
-                subject_id=ref.id,
-                wallet_type=str(WalletType.GRANT),
-                currency=permission_feature(perm),
-            )
-            .exclude(valid_until__lte=at)
-            .values_list("pk", flat=True)
+    async with store.unit_of_work():
+        wallet_ids = await store.live_wallet_ids(
+            subject=subject_ref(subject), wallet_type=WalletType.GRANT, currency=permission_feature(perm), at=at
         )
         for wallet_id in wallet_ids:
-            engine.close_wallet(store, wallet_id, at=at)
+            await engine.close_wallet(store, wallet_id, at=at)
     return len(wallet_ids)
 
 
@@ -164,11 +157,22 @@ class AllowancesBackend:
     and of every group the user belongs to. It authenticates nobody.
 
     An active superuser has every :class:`~django.contrib.auth.models.Permission`. The permissions
-    are read once per user object and cached on it.
+    are read once per user object and cached on it; the synchronous and the asynchronous checks share
+    that cache.
+
+    ``has_perm``, ``get_all_permissions`` and ``has_module_perms`` use :mod:`allowances.sync` with the store
+    from :meth:`get_sync_store`. Django (5.2 and later) calls ``ahas_perm``, ``aget_all_permissions`` and
+    ``ahas_module_perms`` from asynchronous code; they use the asynchronous API with the store from
+    :meth:`get_store`.
     """
 
-    def get_store(self) -> DjangoStore:
-        return DjangoStore()
+    def get_store(self) -> Store:
+        """The store of the asynchronous checks: ``settings.ALLOWANCES_STORE``."""
+        return default_store()
+
+    def get_sync_store(self) -> Store:
+        """The store of the synchronous checks: ``settings.ALLOWANCES_SYNC_STORE``. It must never suspend."""
+        return default_sync_store()
 
     def authenticate(self, request, **credentials):
         return None
@@ -183,11 +187,14 @@ class AllowancesBackend:
         return None
 
     def get_all_permissions(self, user_obj, obj=None) -> set[str]:
-        if obj is not None or not user_obj.is_active or user_obj.is_anonymous:
+        if not self._checked(user_obj, obj):
             return set()
         cached = getattr(user_obj, _CACHE_ATTRIBUTE, None)
         if cached is None:
-            cached = self._superuser_permissions() if user_obj.is_superuser else self._granted(user_obj)
+            if user_obj.is_superuser:
+                cached = self._superuser_permissions()
+            else:
+                cached = run(self._granted(self.get_sync_store(), user_obj))
             setattr(user_obj, _CACHE_ATTRIBUTE, cached)
         return cached
 
@@ -195,17 +202,30 @@ class AllowancesBackend:
         return user_obj.is_active and perm in self.get_all_permissions(user_obj, obj)
 
     def has_module_perms(self, user_obj, app_label) -> bool:
-        prefix = app_label + "."
-        return user_obj.is_active and any(perm.startswith(prefix) for perm in self.get_all_permissions(user_obj))
+        return user_obj.is_active and _has_module(self.get_all_permissions(user_obj), app_label)
 
     async def aget_all_permissions(self, user_obj, obj=None) -> set[str]:
-        return await sync_to_async(self.get_all_permissions)(user_obj, obj)
+        if not self._checked(user_obj, obj):
+            return set()
+        cached = getattr(user_obj, _CACHE_ATTRIBUTE, None)
+        if cached is None:
+            if user_obj.is_superuser:
+                cached = await sync_to_async(self._superuser_permissions)()
+            else:
+                cached = await self._granted(self.get_store(), user_obj)
+            setattr(user_obj, _CACHE_ATTRIBUTE, cached)
+        return cached
 
     async def ahas_perm(self, user_obj, perm, obj=None) -> bool:
-        return await sync_to_async(self.has_perm)(user_obj, perm, obj)
+        return user_obj.is_active and perm in await self.aget_all_permissions(user_obj, obj)
 
     async def ahas_module_perms(self, user_obj, app_label) -> bool:
-        return await sync_to_async(self.has_module_perms)(user_obj, app_label)
+        return user_obj.is_active and _has_module(await self.aget_all_permissions(user_obj), app_label)
+
+    @staticmethod
+    def _checked(user_obj, obj) -> bool:
+        """Whether the user can hold permissions here: no object, active, not anonymous."""
+        return obj is None and user_obj.is_active and not user_obj.is_anonymous
 
     @staticmethod
     def _superuser_permissions() -> set[str]:
@@ -216,8 +236,14 @@ class AllowancesBackend:
             for app_label, codename in Permission.objects.values_list("content_type__app_label", "codename")
         }
 
-    def _granted(self, user_obj) -> set[str]:
-        allowances = engine.effective_allowances(
-            self.get_store(), subject_ref(user_obj), at=timezone.now(), wallet_types=[WalletType.GRANT]
+    @staticmethod
+    async def _granted(store: Store, user_obj) -> set[str]:
+        allowances = await engine.effective_allowances(
+            store, subject_ref(user_obj), at=timezone.now(), wallet_types=[WalletType.GRANT]
         )
         return set(effective_permissions(allowances))
+
+
+def _has_module(permissions: set[str], app_label: str) -> bool:
+    prefix = app_label + "."
+    return any(perm.startswith(prefix) for perm in permissions)
