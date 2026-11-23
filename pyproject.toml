@@ -5,22 +5,19 @@ description = "Grants and consumable budgets, checked before an operation and re
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+authors = [{ name = "Jure Erznožnik", email = "jure.erznoznik@velis.si" }]
 keywords = ["licensing", "entitlements", "quota", "metering", "billing", "ledger", "django"]
-# The core has no dependencies at all. `import allowances` pulls in nothing but the standard library.
+# The core imports only the standard library.
 dependencies = []
 
 [project.urls]
-# PyPI renders these in the sidebar, and gives Homepage/Documentation/Source/Issues their own icons
-# when named exactly like this. Without them the only way off the project page is the README's own
-# links, which is what this section exists to fix.
 Homepage = "https://github.com/velis74/allowances"
-Documentation = "https://docs.velis.si/allowances"
-Source = "https://github.com/velis74/allowances"
+Repository = "https://github.com/velis74/allowances"
 Issues = "https://github.com/velis74/allowances/issues"
+Documentation = "https://docs.velis.si/allowances"
 
 [project.optional-dependencies]
-# Floor: 5.2, the current LTS — 5.1 reached end of life in December 2025 and nothing here needs an
-# API newer than Django 3.1 anyway. Ceiling: the 6.x series, tested against 6.0 and 6.1 in CI.
+# Django 5.2 (LTS) to 6.x; CI tests 5.2, 6.0 and 6.1.
 django = ["Django>=5.2,<7"]
 
 [dependency-groups]
@@ -37,19 +34,19 @@ module-root = ""
 
 [tool.publish]
 tests = "pytest"
+additional_files = ["allowances/__init__.py"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "tests.settings"
-# pytest-django resolves the settings module before pytest inserts rootdir into sys.path, so a bare
-# `pytest` would not find `tests.settings` without this. `python -m pytest` happens to work either way.
+# pytest-django imports the settings module before pytest adds rootdir to sys.path; without this a bare
+# `pytest` cannot import `tests.settings`.
 pythonpath = ["."]
 python_files = "test_*.py"
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-# Markdown is excluded because ruff formats Python blocks embedded in it, and documentation snippets
-# are wrapped for reading rather than to a formatter's line budget.
+# Markdown is excluded: ruff would format the Python code blocks in the documentation.
 exclude = ["*/migrations/*", "*.md", "node_modules"]
 
 [tool.ruff.lint]

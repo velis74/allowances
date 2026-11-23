@@ -233,6 +233,7 @@ JSON body to carry N).
 sliding-window at all — `wallet.balance` is the effective balance directly, exactly like every
 wallet built and tested in concern 1. Sliding-window mode requires a non-empty `reset_config` dict,
 whose shape determines which of the four table rows applies:
+
 - Rolling: `{"window_seconds": <int>}` (defaults to 86400 if the key is omitted but the dict is
   non-empty; a dict without any of the keys below resolves to a 24h rolling window rather than
   raising an error).
@@ -295,6 +296,7 @@ per-draw hook never sees a wallet that expires without being fully drawn, since 
 excludes expired wallets from every candidate query.
 
 **Decision:** Two separate mechanisms:
+
 - `_archive_if_drained(wallet)` runs inside `fulfill()`'s commit loop, immediately after a wallet is
   drawn from, for wallets where `reset_config` is falsy (non-sliding-window) and
   `balance <= 0 and overdraft_limit is None` (no possible future draw without a plan change).
@@ -425,7 +427,7 @@ bulk-deleting rows through raw SQL that bypasses the ORM) would need to re-verif
 
 ---
 
-# Concern 4 — ORM decoupling
+## Concern 4 — ORM decoupling
 
 Entries 20 onward were made while splitting the library into a dependency-free core plus a Django
 storage backend. Everything above this line describes the initial design; where
@@ -477,7 +479,7 @@ the primary key as text. `allowances_django.subjects` converts model instances t
 
 **Reason:** Further consequences: subjects keyed by UUID or slug work, which the
 `PositiveBigIntegerField` object id ruled out. No foreign key to `django_content_type` exists, so
-#19's `db_constraint=False` and the cross-schema `TRUNCATE` failure no longer apply. A
+entry 19's `db_constraint=False` and the cross-schema `TRUNCATE` failure no longer apply. A
 schema-per-tenant deployment does not depend on where `django_content_type` lives.
 
 Costs: `select_related` cannot follow a subject, and a dangling reference is not caught by the
