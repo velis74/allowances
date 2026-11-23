@@ -1,8 +1,10 @@
 """
 The storage port.
 
-The persistence interface of the engine. Two implementations ship with the library:
-:class:`allowances.backends.memory.MemoryStore` and ``allowances_django.store.DjangoStore``.
+The persistence interface of the engine. Implementations shipped with the library:
+:class:`allowances.backends.memory.MemoryStore`, ``allowances_django.store.DjangoStore`` (Django ORM, for the
+asynchronous API), ``allowances_django.sync.store.DjangoStore`` (Django ORM, never suspends) and
+``allowances_adorm.store.AdormStore`` (adorm).
 
 Every implementation guarantees:
 
@@ -21,6 +23,11 @@ wallet afterwards. ``lock_wallets`` takes the locks in ascending wallet id, so t
 wait for each other in a cycle. Wallet ids of one store must therefore be mutually comparable.
 A fulfilment record is locked before its wallets.
 
+**Execution.** Every method except ``unit_of_work`` is a coroutine function; ``unit_of_work`` returns an
+asynchronous context manager. A store whose methods and context manager never suspend (their bodies await
+nothing that yields to the event loop) also serves the synchronous API, :mod:`allowances.sync`, which runs
+the engine's coroutines without an event loop. A store that suspends works only with the asynchronous API.
+
 A backend raises :class:`allowances.errors.UnsupportedOperationError` for an operation it does not
 support.
 """
@@ -29,7 +36,7 @@ from __future__ import annotations
 
 import uuid
 
-from contextlib import AbstractContextManager
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable, Sequence
@@ -52,17 +59,18 @@ class Store(Protocol):
 
     # -- transactions / locking ----------------------------------------------------------------
 
-    def unit_of_work(self) -> AbstractContextManager[None]:
+    def unit_of_work(self) -> AbstractAsyncContextManager[None]:
         """
-        Make everything inside the block atomic: it all commits, or none of it does. Blocks nest:
-        the engine opens one, possibly inside a block the caller opened. A
-        nested block that raises discards its own writes and leaves the outer block's intact.
+        An asynchronous context manager (``async with store.unit_of_work():``) that makes everything
+        inside the block atomic: it all commits, or none of it does. Blocks nest: the engine opens one,
+        possibly inside a block the caller opened. A nested block that raises discards its own writes and
+        leaves the outer block's intact.
         """
         ...
 
     # -- wallets -------------------------------------------------------------------------------
 
-    def find_wallets(
+    async def find_wallets(
         self,
         *,
         subjects: Sequence[SubjectRef],
@@ -79,27 +87,27 @@ class Store(Protocol):
         """
         ...
 
-    def lock_wallets(self, wallet_ids: Sequence[object]) -> list[Wallet]:
+    async def lock_wallets(self, wallet_ids: Sequence[object]) -> list[Wallet]:
         """
         Lock the given live wallets in ascending id order and return their current state in that
         order. Ids of archived or unknown wallets are omitted; a duplicated id is returned once.
         """
         ...
 
-    def get_wallet(self, wallet_id: object, *, lock: bool = False) -> Wallet | None:
+    async def get_wallet(self, wallet_id: object, *, lock: bool = False) -> Wallet | None:
         """
         Fetch one wallet by id; ``None`` for an archived or unknown wallet.
         """
         ...
 
-    def save_wallet(self, wallet: Wallet) -> None:
+    async def save_wallet(self, wallet: Wallet) -> None:
         """
         Persist a wallet's mutable fields: ``balance``, ``first_overdraft_at``, ``valid_from``,
         ``valid_until``, ``overdraft_limit``, ``reset_config``, ``allotment`` and ``scheduled``.
         """
         ...
 
-    def create_wallet(
+    async def create_wallet(
         self,
         *,
         subject: SubjectRef,
@@ -117,18 +125,18 @@ class Store(Protocol):
         """Open a new wallet and return it, with ``id`` and ``created_at`` filled in."""
         ...
 
-    def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[Wallet]:
+    async def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[Wallet]:
         """
         Every wallet of ``subject`` whose ``scheduled`` is set, valid or not, ordered by
         ``(created_at, id)``.
         """
         ...
 
-    def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
+    async def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
         """Wallets whose ``valid_until`` is set and ``<= at``, ordered by ``(created_at, id)``."""
         ...
 
-    def archive_wallet(self, wallet: Wallet) -> None:
+    async def archive_wallet(self, wallet: Wallet) -> None:
         """
         Move a wallet and its transactions to the backend's archive and delete the live rows. The
         archive format is backend-specific.
@@ -137,7 +145,7 @@ class Store(Protocol):
 
     # -- ledger --------------------------------------------------------------------------------
 
-    def sum_transactions(self, *, wallet_id: object, since: datetime, until: datetime) -> Decimal:
+    async def sum_transactions(self, *, wallet_id: object, since: datetime, until: datetime) -> Decimal:
         """
         Sum of ``amount`` over the wallet's transactions in ``[since, until]``, or zero if there
         are none. Runs on every fulfilment against a windowed wallet; implementations answer it with
@@ -145,11 +153,13 @@ class Store(Protocol):
         """
         ...
 
-    def transactions_for_wallet(self, *, wallet_id: object, since: datetime, until: datetime) -> list[Transaction]:
+    async def transactions_for_wallet(
+        self, *, wallet_id: object, since: datetime, until: datetime
+    ) -> list[Transaction]:
         """The wallet's transactions in ``[since, until]``, ordered by ``(created_at, id)``."""
         ...
 
-    def create_transaction(
+    async def create_transaction(
         self,
         *,
         wallet_id: object,
@@ -170,34 +180,36 @@ class Store(Protocol):
         """
         ...
 
-    def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[Transaction]:
+    async def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[Transaction]:
         """
         Every transaction under one fulfilment record, storno rows included, ordered by
         ``(created_at, id)``.
         """
         ...
 
-    def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
+    async def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         """Set ``obj`` on the given transactions."""
         ...
 
     # -- fulfilment records -------------------------------------------------------------------
 
-    def get_or_create_record(self, guid: uuid.UUID | None = None) -> FulfillmentRecord:
+    async def get_or_create_record(self, guid: uuid.UUID | None = None) -> FulfillmentRecord:
         """
         Fetch the record with this ``guid``, creating it if absent. ``guid=None`` always creates a
         new record with a new guid.
         """
         ...
 
-    def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> FulfillmentRecord | None:
+    async def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> FulfillmentRecord | None:
         """
         Fetch a record, or ``None``. ``lock=True`` serialises concurrent operations on the record,
         so two concurrent ``unfulfill()`` calls cannot reverse the same transaction twice.
         """
         ...
 
-    def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[FulfillmentRecord]:
+    async def records_with_unattached_transactions(
+        self, *, older_than: datetime | None = None
+    ) -> list[FulfillmentRecord]:
         """
         Records holding at least one ``CONSUMPTION`` transaction without an attached domain object
         (the business operation may have failed before ``attach()``). Transactions of other kinds
@@ -207,22 +219,22 @@ class Store(Protocol):
 
     # -- memberships ---------------------------------------------------------------------------
 
-    def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
+    async def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
         """Record that ``member`` is a direct member of ``group``. The pair is stored at most once."""
         ...
 
-    def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
+    async def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
         """Remove the direct membership of ``member`` in ``group``. Returns whether it existed."""
         ...
 
-    def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
+    async def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
         """
         Direct ``(member, group)`` pairs whose member is any of ``members``, ordered by creation,
         oldest first.
         """
         ...
 
-    def lock_memberships(self) -> None:
+    async def lock_memberships(self) -> None:
         """
         Serialise membership changes for the rest of the current unit of work, on every database
         the backend supports.
@@ -231,7 +243,9 @@ class Store(Protocol):
 
     # -- modifiers -----------------------------------------------------------------------------
 
-    def find_modifier_factors(self, *, feature: str, subjects: Sequence[SubjectRef], at: datetime) -> list[Decimal]:
+    async def find_modifier_factors(
+        self, *, feature: str, subjects: Sequence[SubjectRef], at: datetime
+    ) -> list[Decimal]:
         """
         Factors of every modifier for ``feature`` that applies to any of ``subjects`` at ``at``: ``valid_from``
         null or ``<= at``, ``valid_until`` null or ``> at``.

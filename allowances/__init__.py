@@ -6,6 +6,9 @@ The core has no dependencies and reads and writes state only through a
 :class:`~allowances.store.Store` passed to each call. ``import allowances`` imports no web framework
 and no database driver.
 
+Every function that reads or writes state is a coroutine. :mod:`allowances.sync` has the same names as
+plain functions, for synchronous code with a store that never suspends.
+
 Applications usually call a backend's shortcuts instead (``allowances_django.shortcuts``, installed
 with ``pip install allowances[django]``); the shortcuts supply the store.
 """
@@ -45,6 +48,7 @@ from allowances.errors import (
     InsufficientBalanceError,
     MembershipCycleError,
     RecordNotFoundError,
+    StoreSuspendedError,
     UnsuitableWalletError,
     UnsupportedOperationError,
     WalletNotFoundError,
@@ -88,6 +92,7 @@ __all__ = [
     "PLAN_SOURCE",
     "RecordNotFoundError",
     "Store",
+    "StoreSuspendedError",
     "SubjectRef",
     "SwitchPolicy",
     "Transaction",
