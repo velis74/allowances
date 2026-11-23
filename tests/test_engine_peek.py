@@ -59,3 +59,15 @@ def test_peek_reports_the_modifier_it_would_apply(store, alice, provider):
 
     assert result.modifier_applied == Decimal("0.5")
     assert result.satisfied is True
+
+
+def test_peek_reports_the_smallest_of_several_modifiers(store, alice, provider):
+    from tests.helpers import add_modifier
+
+    open_wallet(store, alice, balance="10")
+    add_modifier(store, subject=alice, feature="send_email", factor="1.5")
+    add_modifier(store, subject=alice, feature="send_email", factor="0.25")
+
+    result = peek(store, "send_email", 4, {"device": alice}, provider)
+
+    assert result.modifier_applied == Decimal("0.25")
