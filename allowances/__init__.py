@@ -18,24 +18,30 @@ from allowances.definitions import (
     FeatureSection,
 )
 from allowances.engine import (
+    add_member,
     adjust_wallet,
     archive_expired_wallets,
     attach,
     cancel_scheduled_switch,
+    close_wallet,
     consumed,
     credit,
     effective_balance,
     find_unattached_fulfillment_records,
     fulfill,
+    groups_of,
     open_wallet,
     peek,
     plan_switch,
+    remove_member,
+    transfer,
     unfulfill,
 )
 from allowances.errors import (
     AllowancesError,
     DefinitionNotFoundError,
     InsufficientBalanceError,
+    MembershipCycleError,
     RecordNotFoundError,
     UnsuitableWalletError,
     UnsupportedOperationError,
@@ -58,7 +64,7 @@ from allowances.types import (
 )
 from allowances.windows import window_start
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "AllowancesError",
@@ -72,6 +78,7 @@ __all__ = [
     "FulfillmentRecord",
     "FulfillmentResult",
     "InsufficientBalanceError",
+    "MembershipCycleError",
     "Modifier",
     "ObjectRef",
     "PLAN_SOURCE",
@@ -87,18 +94,23 @@ __all__ = [
     "WalletNotFoundError",
     "WalletSpec",
     "WalletType",
+    "add_member",
     "archive_expired_wallets",
     "adjust_wallet",
     "attach",
     "cancel_scheduled_switch",
+    "close_wallet",
     "consumed",
     "credit",
     "effective_balance",
     "find_unattached_fulfillment_records",
     "fulfill",
+    "groups_of",
     "open_wallet",
     "peek",
     "plan_switch",
+    "remove_member",
+    "transfer",
     "unfulfill",
     "window_start",
 ]

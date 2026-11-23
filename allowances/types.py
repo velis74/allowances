@@ -36,11 +36,13 @@ class WalletType(StrEnum):
 class TransactionKind(StrEnum):
     """
     A grant (balance added by :func:`allowances.engine.credit` or changed by a plan adjustment), a
-    consumption (balance drawn), or a storno (an earlier entry reversed).
+    consumption (balance drawn; zero for a use of a rate-0 right), a transfer (one leg of
+    :func:`allowances.engine.transfer`), or a storno (an earlier entry reversed).
     """
 
     GRANT = "grant"
     CONSUMPTION = "consumption"
+    TRANSFER = "transfer"
     STORNO = "storno"
 
 
@@ -162,8 +164,11 @@ class Wallet:
 @dataclass(frozen=True, slots=True)
 class Transaction:
     """
-    One ledger entry against a wallet. ``amount`` is signed: negative for consumption, positive for
-    a grant or for the storno that reverses a consumption.
+    One ledger entry against a wallet. ``amount`` is signed: negative for consumption and for the
+    debit leg of a transfer, positive for a grant and for the credit leg of a transfer; a storno
+    carries the negated amount of the entry it reverses.
+
+    ``actor`` is the subject on whose behalf the entry was made, or ``None`` when none was given.
     """
 
     id: object
@@ -175,6 +180,7 @@ class Transaction:
     feature: str = ""
     storno_of_id: object = None
     obj: ObjectRef | None = None
+    actor: SubjectRef | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,8 @@
 """
-The fulfillment engine — ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``,
-``open_wallet``, ``adjust_wallet``, ``consumed``, ``plan_switch``, ``cancel_scheduled_switch``.
+The fulfillment engine — ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``, ``transfer``,
+``open_wallet``, ``adjust_wallet``, ``close_wallet``, ``consumed``, ``plan_switch``,
+``cancel_scheduled_switch``, and the membership functions ``add_member``, ``remove_member``,
+``groups_of``.
 
 Nothing in this module knows what a database is. It receives a :class:`~allowances.store.Store`
 and a :class:`~allowances.definitions.DefinitionProvider` and does arithmetic between them, which
@@ -23,6 +25,7 @@ from typing import Iterable, Sequence
 from allowances.definitions import DefinitionProvider, FeatureDefinition
 from allowances.errors import (
     InsufficientBalanceError,
+    MembershipCycleError,
     RecordNotFoundError,
     UnsuitableWalletError,
     WalletNotFoundError,
@@ -54,6 +57,26 @@ class _Draw:
     qty: Decimal
 
 
+_ZERO = Decimal("0")
+
+
+def _negated(amount: Decimal) -> Decimal:
+    """``-amount``, with zero kept positive."""
+    return _ZERO - amount
+
+
+def _same_id(a: object, b: object) -> bool:
+    return a == b or str(a) == str(b)
+
+
+def _lock(store: Store, wallet_ids: Iterable[object]) -> dict:
+    """Lock the wallets in one :meth:`~allowances.store.Store.lock_wallets` call; their state by id."""
+    ids = list(dict.fromkeys(wallet_ids))
+    if not ids:
+        return {}
+    return {wallet.id: wallet for wallet in store.lock_wallets(ids)}
+
+
 # -------------------------------------------------------------------------------------------------
 # Balances
 # -------------------------------------------------------------------------------------------------
@@ -81,24 +104,52 @@ def effective_balance(store: Store, wallet: Wallet, at: datetime | None = None) 
 # -------------------------------------------------------------------------------------------------
 
 
-def _ordered_wallets(
-    store: Store, feature_def: FeatureDefinition, subjects: dict, at: datetime, lock: bool
-) -> list[Wallet]:
+def _expand(store: Store, subjects: dict) -> dict[str, list[SubjectRef]]:
+    """
+    Each caller-supplied subject with its transitive groups, under the same key: the subject, then
+    its direct groups, then theirs, breadth-first and deduplicated per key.
+    """
+    expanded = {key: [subject] for key, subject in subjects.items()}
+    seen = {key: {subject} for key, subject in subjects.items()}
+    frontiers = {key: [subject] for key, subject in subjects.items()}
+    while any(frontiers.values()):
+        members = list(dict.fromkeys(m for frontier in frontiers.values() for m in frontier))
+        groups_by_member: dict[SubjectRef, list[SubjectRef]] = {}
+        for member, group in store.memberships_of(members=members):
+            groups_by_member.setdefault(member, []).append(group)
+        for key, frontier in frontiers.items():
+            following = []
+            for member in frontier:
+                for group in groups_by_member.get(member, []):
+                    if group not in seen[key]:
+                        seen[key].add(group)
+                        expanded[key].append(group)
+                        following.append(group)
+            frontiers[key] = following
+    return expanded
+
+
+def _all_subjects(expanded: dict[str, list[SubjectRef]]) -> list[SubjectRef]:
+    return list(dict.fromkeys(subject for refs in expanded.values() for subject in refs))
+
+
+def _ordered_wallets(store: Store, feature_def: FeatureDefinition, expanded: dict, at: datetime) -> list[Wallet]:
     """
     Expand ``fulfillment_order`` into a concrete, deduplicated list of candidate wallets in the
-    order they should be drawn from.
+    order they should be drawn from, as they are at ``at``. Nothing is locked or written.
 
-    A callable ``fulfillment_order`` gets one flat list of every plausible candidate and decides
-    the order itself. A list of steps is walked in declaration order; within a step, wallets that
-    expire soonest come first, wallets without ``valid_until`` last, and equal expiries oldest-first.
+    A callable ``fulfillment_order`` gets one flat list of every plausible candidate of every
+    expanded subject and decides the order itself. A list of steps is walked in declaration order;
+    a step naming a key walks that key's subjects in expansion order, a step without one walks
+    every expanded subject. Within one subject, wallets that expire soonest come first, wallets
+    without ``valid_until`` last, and equal expiries oldest-first.
     """
-    subject_refs = list(subjects.values())
+    subject_refs = _all_subjects(expanded)
     if not subject_refs:
         return []
 
     def current(found: list[Wallet]) -> list[Wallet]:
-        # A plan switch that has come due is applied (when locked for writing) or only viewed.
-        wallets = [_settle(store, w, at) if lock else _view(w, at) for w in found]
+        wallets = [_view(w, at) for w in found]
         return [w for w in wallets if w.is_valid_at(at)]
 
     if callable(feature_def.fulfillment_order):
@@ -114,7 +165,6 @@ def _ordered_wallets(
                 wallet_types=wallet_types,
                 currencies=sorted(currencies),
                 at=at,
-                lock=lock,
             )
         )
         return list(feature_def.fulfillment_order(candidates))
@@ -128,10 +178,8 @@ def _ordered_wallets(
         # declared once and called from contexts that legitimately know about different subjects.
         if step_subject is None:
             step_subjects = subject_refs
-        elif step_subject in subjects:
-            step_subjects = [subjects[step_subject]]
         else:
-            step_subjects = []
+            step_subjects = expanded.get(step_subject, [])
         for wallet_type in wallet_types:
             section = feature_def.section_for(wallet_type)
             if section is None or not step_subjects:
@@ -143,7 +191,6 @@ def _ordered_wallets(
                         wallet_types=[wallet_type],
                         currencies=section.currency_names,
                         at=at,
-                        lock=lock,
                     )
                 )
                 for wallet in sorted(found, key=_expiry_key):
@@ -153,6 +200,23 @@ def _ordered_wallets(
                         seen.add(wallet.id)
                         ordered.append(wallet)
     return ordered
+
+
+def _locked_candidates(store: Store, candidates: list[Wallet], at: datetime) -> list[Wallet]:
+    """
+    Lock every candidate in one pass and return their current state in draw order, with a plan
+    switch that has come due written, and without wallets no longer valid at ``at``.
+    """
+    locked = _lock(store, [w.id for w in candidates])
+    result = []
+    for wallet in candidates:
+        fresh = locked.get(wallet.id)
+        if fresh is None:
+            continue
+        fresh = _settle(store, fresh, at)
+        if fresh.is_valid_at(at):
+            result.append(fresh)
+    return result
 
 
 def _expiry_key(wallet: Wallet):
@@ -177,6 +241,9 @@ def _consume(
 
     ``pending`` carries in-flight draws per wallet id across calls, so the overdraft pass sees what
     the ordinary pass already took and doesn't spend the same balance twice.
+
+    A wallet whose effective rate is zero is a right: with a positive balance it covers the whole
+    remainder at cost zero, and it never takes part in the overdraft pass.
     """
     drawn: list[_Draw] = []
     for wallet in wallets:
@@ -189,6 +256,13 @@ def _consume(
 
         already = pending.get(wallet.id, Decimal("0"))
         balance = effective_balance(store, wallet, at) - already
+        effective_rate = rate * modifier_factor
+
+        if effective_rate == 0:
+            if not use_overdraft and balance > 0:
+                drawn.append(_Draw(wallet=wallet, cost=_ZERO, qty=remaining))
+                remaining = _ZERO
+            continue
 
         if use_overdraft:
             # Only wallets that were given an explicit overdraft limit take part in the second pass.
@@ -200,13 +274,7 @@ def _consume(
         if capacity <= 0:
             continue
 
-        effective_rate = rate * modifier_factor
-        if effective_rate == 0:
-            # A zero rate means the feature is free out of this wallet — it covers the whole
-            # remainder without costing anything.
-            qty_from_wallet = remaining
-        else:
-            qty_from_wallet = min(remaining, capacity / effective_rate)
+        qty_from_wallet = min(remaining, capacity / effective_rate)
         if qty_from_wallet <= 0:
             continue
 
@@ -219,7 +287,7 @@ def _consume(
             # than the rounding implied.
             cost = capacity
 
-        qty_covered = remaining if effective_rate == 0 else min(cost / effective_rate, remaining)
+        qty_covered = min(cost / effective_rate, remaining)
 
         drawn.append(_Draw(wallet=wallet, cost=cost, qty=qty_covered))
         pending[wallet.id] = already + cost
@@ -228,11 +296,11 @@ def _consume(
     return drawn, remaining
 
 
-def _modifier_factor(store: Store, feature: str, subjects: dict, at: datetime) -> Decimal:
+def _modifier_factor(store: Store, feature: str, subjects: list[SubjectRef], at: datetime) -> Decimal:
     """Where several modifiers apply, the subject gets the most favourable one."""
     if not subjects:
         return Decimal("1")
-    factors = store.find_modifier_factors(feature=feature, subjects=list(subjects.values()), at=at)
+    factors = store.find_modifier_factors(feature=feature, subjects=subjects, at=at)
     return max(factors) if factors else Decimal("1")
 
 
@@ -249,10 +317,16 @@ def _plan(
     """
     Plan the whole request: ordinary balances first, and only if something is still uncovered and
     the feature permits it, a second pass over wallets with overdraft headroom.
+
+    ``subjects`` are expanded with their groups. With ``lock`` every candidate wallet is locked in
+    one pass before any balance is read, and a plan switch that has come due is written.
     """
     pending: dict = {}
-    candidates = _ordered_wallets(store, feature_def, subjects, at, lock)
-    factor = _modifier_factor(store, feature, subjects, at)
+    expanded = _expand(store, subjects)
+    candidates = _ordered_wallets(store, feature_def, expanded, at)
+    if lock:
+        candidates = _locked_candidates(store, candidates, at)
+    factor = _modifier_factor(store, feature, _all_subjects(expanded), at)
 
     drawn, remaining = _consume(store, candidates, feature_def, quantity, factor, provider, at, False, pending)
     if remaining > 0 and feature_def.overdraft:
@@ -294,7 +368,12 @@ def archive_expired_wallets(store: Store, at: datetime | None = None) -> int:
     at = at or utcnow()
     archived = 0
     with store.unit_of_work():
-        for wallet in store.find_expired_wallets(at=at, lock=True):
+        expired = store.find_expired_wallets(at=at)
+        locked = _lock(store, [w.id for w in expired])
+        for found in expired:
+            wallet = locked.get(found.id)
+            if wallet is None:
+                continue
             wallet = _settle(store, wallet, at)
             if wallet.valid_until is None or wallet.valid_until > at:
                 continue
@@ -321,6 +400,7 @@ def peek(
 
     No transactions, no fulfillment record, no balance changes. The answer is a snapshot and
     carries no reservation — a concurrent caller can spend what this said was available.
+    ``subjects`` are expanded with their groups, as in :func:`fulfill`.
     """
     feature_def = provider.get_feature(feature)
     at = at or utcnow()
@@ -347,6 +427,8 @@ def fulfill(
     guid: uuid.UUID | None = None,
     allow_partial: bool = False,
     at: datetime | None = None,
+    *,
+    actor: SubjectRef | None = None,
 ) -> FulfillmentResult:
     """
     Actually consume the licence, writing one transaction per wallet drawn from.
@@ -358,14 +440,25 @@ def fulfill(
 
     Passing a ``guid`` groups this call with earlier ones under a single fulfillment record, so one
     business operation spanning several features can be reversed as a unit.
+
+    Every subject in ``subjects`` is expanded with its transitive groups under the same key (see
+    :func:`groups_of`). A wallet with an effective rate of zero and a positive balance (a right)
+    covers the rest of the request; its use is recorded as a consumption entry of amount zero.
+
+    ``actor`` is recorded on every entry. Without one, the actor is the single subject of
+    ``subjects`` when it holds exactly one, else ``None``.
+
+    Every candidate wallet is locked in one pass, in ascending id order, before balances are read.
     """
     feature_def = provider.get_feature(feature)
     at = at or utcnow()
     quantity = Decimal(str(quantity))
     subjects = subjects or {}
+    if actor is None and len(subjects) == 1:
+        actor = next(iter(subjects.values()))
 
     with store.unit_of_work():
-        record = store.get_or_create_record(guid)
+        record = _record(store, guid)
         drawn, remaining, factor = _plan(store, feature_def, feature, quantity, subjects, provider, at, lock=True)
         satisfied = remaining <= 0
         granted = quantity - remaining
@@ -392,12 +485,15 @@ def fulfill(
                 store.create_transaction(
                     wallet_id=wallet.id,
                     kind=TransactionKind.CONSUMPTION,
-                    amount=-draw.cost,
+                    amount=_negated(draw.cost),
                     record_guid=record.guid,
                     feature=feature,
                     at=at,
+                    actor=actor,
                 )
             )
+            if draw.cost == 0:
+                continue
 
             if not wallet.reset_config:
                 balance = wallet.balance - draw.cost
@@ -425,13 +521,21 @@ def fulfill(
         )
 
 
+def _record(store: Store, guid: uuid.UUID | None):
+    """The record for ``guid`` (a new one for ``None``); an existing record is locked."""
+    record = store.get_or_create_record(guid)
+    if guid is not None:
+        store.get_record(record.guid, lock=True)
+    return record
+
+
 def attach(store: Store, guid: uuid.UUID, obj: ObjectRef) -> None:
     """
     Record which domain object a fulfillment paid for.
 
     Fulfillment happens before the business operation completes — you consume the quota, then send
     the email. This closes the loop afterwards, and it is what makes a record with unattached
-    transactions a usable signal that something died in between.
+    consumption entries a usable signal that something died in between.
     """
     with store.unit_of_work():
         if store.get_record(guid) is None:
@@ -441,16 +545,31 @@ def attach(store: Store, guid: uuid.UUID, obj: ObjectRef) -> None:
             store.attach_object(transaction_ids=pending, obj=obj)
 
 
-def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None) -> None:
+def _refuse_archived_source(wallet_id: object) -> None:
+    where = f" {wallet_id!r}" if wallet_id is not None else ""
+    raise WalletNotFoundError(f"The source wallet{where} of a transfer is archived; the transfer cannot be reversed")
+
+
+def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None, *, actor: SubjectRef | None = None) -> None:
     """
-    Give back everything consumed under one fulfillment record.
+    Give back everything recorded under one fulfillment record: consumption, credits and transfers.
 
-    Nothing is deleted or edited: each original gets a matching storno entry, so the ledger still
-    shows what happened and what undid it. Calling this twice is a no-op the second time — a
-    transaction that already has its storno is left alone.
+    Nothing is deleted or edited: each original gets a matching storno entry carrying ``actor`` (who
+    reversed it), so the ledger still shows what happened and what undid it. Calling this twice is a
+    no-op the second time — a transaction that already has its storno is left alone.
 
-    Transactions whose wallet has since been archived are skipped: that wallet is gone from live
-    storage and there is nothing left to credit.
+    Reversing a transfer takes the amount back from its target. The check nets every storno of the
+    record on that wallet, so a consumption of the transferred amount under the same guid is given
+    back first. When the target would still end below zero (it is archived, or
+    ``max(effective_balance, 0)`` plus the record's net change is negative),
+    :class:`~allowances.errors.InsufficientBalanceError` is raised and nothing is written. When the
+    source of a transfer is archived, :class:`~allowances.errors.WalletNotFoundError` is raised and
+    nothing is written.
+
+    Other transactions whose wallet has since been archived are skipped: that wallet is gone from
+    live storage and there is nothing left to credit.
+
+    The record is locked first, then every wallet involved in one pass, in ascending id order.
     """
     at = at or utcnow()
     with store.unit_of_work():
@@ -459,16 +578,56 @@ def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None) -> None
         if store.get_record(guid, lock=True) is None:
             raise RecordNotFoundError(f"No fulfillment record with guid {guid}")
 
-        transactions = store.transactions_for_record(record_guid=guid, lock=True)
+        # Read without row locks: the record lock serialises reversals, and wallets are locked before rows.
+        transactions = store.transactions_for_record(record_guid=guid)
         reversed_ids = {t.storno_of_id for t in transactions if t.storno_of_id is not None}
         originals = [t for t in transactions if t.kind != TransactionKind.STORNO and t.id not in reversed_ids]
 
+        wallets = {
+            wallet_id: _settle(store, wallet, at)
+            for wallet_id, wallet in _lock(store, [t.wallet_id for t in originals]).items()
+        }
+
+        net: dict = {}
+        owed: dict = {}
+        unpaired: dict = {}
         for original in originals:
-            wallet = store.get_wallet(original.wallet_id, lock=True)
+            net[original.wallet_id] = net.get(original.wallet_id, _ZERO) - original.amount
+            if original.kind != TransactionKind.TRANSFER:
+                continue
+            # Archiving a wallet removes its entries from the record, so a leg without its
+            # counterpart means the other wallet is archived.
+            unpaired[abs(original.amount)] = unpaired.get(abs(original.amount), 0) + (1 if original.amount > 0 else -1)
+            if original.amount > 0:
+                owed[original.wallet_id] = owed.get(original.wallet_id, _ZERO) + original.amount
+            elif original.wallet_id not in wallets:
+                _refuse_archived_source(original.wallet_id)
+        for amount, surplus in unpaired.items():
+            if surplus > 0:
+                _refuse_archived_source(None)
+            if surplus < 0:
+                raise InsufficientBalanceError(
+                    FulfillmentResult(requested=amount, granted=_ZERO, satisfied=False, transactions=[], guid=guid)
+                )
+        for wallet_id, amount in owed.items():
+            wallet = wallets.get(wallet_id)
+            available = max(effective_balance(store, wallet, at), _ZERO) if wallet is not None else _ZERO
+            if wallet is None or available + net[wallet_id] < 0:
+                raise InsufficientBalanceError(
+                    FulfillmentResult(
+                        requested=amount if wallet is None else _negated(net[wallet_id]),
+                        granted=available,
+                        satisfied=False,
+                        transactions=[],
+                        guid=guid,
+                    )
+                )
+
+        for original in originals:
+            wallet = wallets.get(original.wallet_id)
             if wallet is None:
                 continue
-            wallet = _settle(store, wallet, at)
-            amount = -original.amount
+            amount = _negated(original.amount)
             store.create_transaction(
                 wallet_id=wallet.id,
                 kind=TransactionKind.STORNO,
@@ -477,9 +636,12 @@ def unfulfill(store: Store, guid: uuid.UUID, at: datetime | None = None) -> None
                 feature=original.feature,
                 storno_of_id=original.id,
                 at=at,
+                actor=actor,
             )
-            if not wallet.reset_config:
-                store.save_wallet(replace(wallet, balance=wallet.balance + amount))
+            if not wallet.reset_config and amount != 0:
+                wallet = replace(wallet, balance=wallet.balance + amount)
+                store.save_wallet(wallet)
+                wallets[wallet.id] = wallet
 
 
 def credit(
@@ -489,14 +651,14 @@ def credit(
     *,
     guid: uuid.UUID | None = None,
     obj: ObjectRef | None = None,
+    actor: SubjectRef | None = None,
     at: datetime | None = None,
 ) -> Transaction:
     """
-    Add ``amount`` to a wallet's balance, as a ``GRANT`` ledger entry.
+    Add ``amount`` to a wallet's balance, as a ``GRANT`` ledger entry recorded with ``actor``.
 
     ``obj`` attaches the entry to the domain object that paid for it (a payment, an order). ``guid``
-    files the entry under a fulfillment record, so :func:`unfulfill` can reverse it; a record whose
-    entry has no ``obj`` is reported by :func:`find_unattached_fulfillment_records`.
+    files the entry under a fulfillment record, so :func:`unfulfill` can reverse it.
 
     Raises :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet,
     :class:`~allowances.errors.UnsuitableWalletError` for a windowed one or one not valid at ``at``, and
@@ -507,6 +669,7 @@ def credit(
     if amount <= 0:
         raise ValueError(f"A credit must be positive, got {amount}")
     with store.unit_of_work():
+        record_guid = _record(store, guid).guid if guid is not None else None
         wallet = store.get_wallet(wallet_id, lock=True)
         if wallet is None:
             raise WalletNotFoundError(f"No live wallet with id {wallet_id!r}")
@@ -516,19 +679,112 @@ def credit(
         if not wallet.is_valid_at(at):
             raise UnsuitableWalletError(f"Wallet {wallet_id!r} is not valid at {at.isoformat()}")
 
-        record_guid = store.get_or_create_record(guid).guid if guid is not None else None
         txn = store.create_transaction(
             wallet_id=wallet.id,
             kind=TransactionKind.GRANT,
             amount=amount,
             record_guid=record_guid,
             at=at,
+            actor=actor,
         )
         if obj is not None:
             store.attach_object(transaction_ids=[txn.id], obj=obj)
             txn = replace(txn, obj=obj)
         store.save_wallet(replace(wallet, balance=wallet.balance + amount))
     return txn
+
+
+def transfer(
+    store: Store,
+    from_wallet_id: object,
+    to_wallet_id: object,
+    amount,
+    *,
+    guid: uuid.UUID | None = None,
+    obj: ObjectRef | None = None,
+    actor: SubjectRef | None = None,
+    at: datetime | None = None,
+) -> FulfillmentResult:
+    """
+    Move ``amount`` from one wallet to another of the same currency.
+
+    Writes two ``TRANSFER`` entries under one fulfillment record (``guid``, or a new one): a debit
+    on the source and a credit on the target, both recorded with ``actor`` and attached to ``obj``
+    when given. The wallet types may differ. A windowed wallet's stored allotment is not changed;
+    the entries count in its window like any other. :func:`unfulfill` reverses both legs.
+
+    The source must hold the amount (``max(effective_balance, 0) >= amount``); overdraft is never
+    used. Both wallets are locked in one pass, in ascending id order.
+
+    Raises ``ValueError`` for an amount that is not positive,
+    :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet,
+    :class:`~allowances.errors.UnsuitableWalletError` for the same wallet on both sides, different
+    currencies, or a wallet not valid at ``at``, and
+    :class:`~allowances.errors.InsufficientBalanceError` when the source does not hold the amount.
+    Nothing is written when it raises.
+    """
+    at = at or utcnow()
+    amount = Decimal(str(amount))
+    if amount <= 0:
+        raise ValueError(f"A transfer must be positive, got {amount}")
+    if _same_id(from_wallet_id, to_wallet_id):
+        raise UnsuitableWalletError(f"Cannot transfer from wallet {from_wallet_id!r} to itself")
+
+    with store.unit_of_work():
+        record = _record(store, guid)
+        locked = store.lock_wallets([from_wallet_id, to_wallet_id])
+        source = next((w for w in locked if _same_id(w.id, from_wallet_id)), None)
+        target = next((w for w in locked if _same_id(w.id, to_wallet_id)), None)
+        for wallet, wallet_id in ((source, from_wallet_id), (target, to_wallet_id)):
+            if wallet is None:
+                raise WalletNotFoundError(f"No live wallet with id {wallet_id!r}")
+        source = _settle(store, source, at)
+        target = _settle(store, target, at)
+        if source.currency != target.currency:
+            raise UnsuitableWalletError(
+                f"Wallet {from_wallet_id!r} holds {source.currency!r}, wallet {to_wallet_id!r} {target.currency!r}"
+            )
+        for wallet in (source, target):
+            if not wallet.is_valid_at(at):
+                raise UnsuitableWalletError(f"Wallet {wallet.id!r} is not valid at {at.isoformat()}")
+
+        available = max(effective_balance(store, source, at), _ZERO)
+        if available < amount:
+            raise InsufficientBalanceError(
+                FulfillmentResult(
+                    requested=amount,
+                    granted=available,
+                    satisfied=False,
+                    transactions=[],
+                    guid=record.guid,
+                )
+            )
+
+        legs = []
+        for wallet, delta in ((source, _negated(amount)), (target, amount)):
+            legs.append(
+                store.create_transaction(
+                    wallet_id=wallet.id,
+                    kind=TransactionKind.TRANSFER,
+                    amount=delta,
+                    record_guid=record.guid,
+                    at=at,
+                    actor=actor,
+                )
+            )
+            if not wallet.reset_config:
+                store.save_wallet(replace(wallet, balance=wallet.balance + delta))
+        if obj is not None:
+            store.attach_object(transaction_ids=[t.id for t in legs], obj=obj)
+            legs = [replace(t, obj=obj) for t in legs]
+
+    return FulfillmentResult(
+        requested=amount,
+        granted=amount,
+        satisfied=True,
+        transactions=legs,
+        guid=record.guid,
+    )
 
 
 def _open(
@@ -679,13 +935,15 @@ def _revert(store: Store, wallet: Wallet, now: datetime) -> None:
         store.save_wallet(replace(wallet, scheduled=None))
 
 
-def _resolve_scheduled(store: Store, subject: SubjectRef, now: datetime, cancel: bool) -> bool:
+def _resolve_scheduled(store: Store, wallets: Iterable[Wallet], now: datetime, cancel: bool) -> bool:
     """
-    Settle the subject's switch records that have come due; with ``cancel``, revert the ones that
-    have not. Returns whether anything was reverted.
+    Settle the switch records on ``wallets`` (locked by the caller) that have come due; with
+    ``cancel``, revert the ones that have not. Returns whether anything was reverted.
     """
     reverted = False
-    for wallet in store.find_scheduled_wallets(subject=subject, lock=True):
+    for wallet in wallets:
+        if not wallet.scheduled:
+            continue
         if _scheduled_at(wallet) > now:
             if cancel:
                 _revert(store, wallet, now)
@@ -731,18 +989,49 @@ def adjust_wallet(store: Store, wallet_id: object, allotment, *, at: datetime | 
         return _reallot(store, wallet, Decimal(str(allotment)), False, at)
 
 
+def close_wallet(store: Store, wallet_id: object, *, at: datetime | None = None) -> Wallet:
+    """
+    End a wallet at ``at`` (default now) — revoking a right, closing a budget.
+
+    A scheduled plan-switch adjustment already due at ``at`` is applied first. The wallet's
+    ``valid_until`` becomes ``at`` unless it already ends earlier, and a scheduled switch record not
+    yet effective is dropped. No ledger entry is written and the balance is unchanged;
+    :func:`archive_expired_wallets` archives the wallet later. Returns the closed wallet.
+
+    Raises :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet.
+    """
+    at = at or utcnow()
+    with store.unit_of_work():
+        locked = store.lock_wallets([wallet_id])
+        if not locked:
+            raise WalletNotFoundError(f"No live wallet with id {wallet_id!r}")
+        wallet = _settle(store, locked[0], at)
+        valid_until = wallet.valid_until if wallet.valid_until is not None and wallet.valid_until <= at else at
+        wallet = replace(wallet, valid_until=valid_until, scheduled=None)
+        store.save_wallet(wallet)
+        return wallet
+
+
 def consumed(store: Store, wallet_id: object, since: datetime, until: datetime) -> Decimal:
     """
     Net amount drawn from a wallet in ``[since, until]``: consumption minus the reversals of
-    consumption booked in that interval. Credits, plan adjustments and their reversals do not count.
-    This is the figure a host application bills for a postpaid budget wallet.
+    consumption booked in that interval. Credits, transfers, plan adjustments and their reversals do
+    not count. This is the figure a host application bills for a postpaid budget wallet.
     """
     total = Decimal("0")
+    kinds: dict = {}
     for txn in store.transactions_for_wallet(wallet_id=wallet_id, since=since, until=until):
-        # Consumption is always negative and a credit always positive, so a positive storno
-        # reverses a consumption and a negative one reverses a credit.
-        if txn.kind == TransactionKind.CONSUMPTION or (txn.kind == TransactionKind.STORNO and txn.amount > 0):
+        if txn.kind == TransactionKind.CONSUMPTION:
             total -= txn.amount
+        elif txn.kind == TransactionKind.STORNO and txn.amount > 0:
+            # A positive storno reverses a consumption or a transfer debit; only the first counts.
+            if txn.record_guid is not None and txn.record_guid not in kinds:
+                kinds[txn.record_guid] = {
+                    t.id: t.kind for t in store.transactions_for_record(record_guid=txn.record_guid)
+                }
+            original_kind = kinds.get(txn.record_guid, {}).get(txn.storno_of_id, TransactionKind.CONSUMPTION)
+            if original_kind == TransactionKind.CONSUMPTION:
+                total -= txn.amount
     return total
 
 
@@ -765,27 +1054,42 @@ def plan_switch(
     with :func:`cancel_scheduled_switch` until it takes effect, and a new switch for the same
     subject replaces it.
 
-    Each spec is applied once per subject. Returns the resulting wallets, kept or opened, per
-    subject in spec order.
+    Each spec is applied once per subject, also when the same subject is given under several keys.
+    Returns the resulting wallets, kept or opened, per subject in spec order.
+
+    Every wallet of the subjects that the switch may change is locked in one pass, in ascending id
+    order, before any is changed.
     """
     now = utcnow()
     effective_date = effective_date or now
     scheduled = effective_date > now
+    both_types = [WalletType.GRANT, WalletType.CONSUMABLE]
 
+    # A subject given under several keys is switched once.
+    unique_subjects = list(dict.fromkeys(subjects.values()))
     result: list[Wallet] = []
     with store.unit_of_work():
-        for subject in subjects.values():
-            _resolve_scheduled(store, subject, now, cancel=True)
+        pending = {subject: store.find_scheduled_wallets(subject=subject) for subject in unique_subjects}
+        candidate_ids = [w.id for wallets in pending.values() for w in wallets]
+        for subject in unique_subjects:
+            candidate_ids += [
+                w.id
+                for w in store.find_wallets(
+                    subjects=[subject], wallet_types=both_types, currencies=None, at=effective_date
+                )
+            ]
+        locked = _lock(store, candidate_ids)
+
+        for subject in unique_subjects:
+            # Read under the locks; a wallet found only after locking was not locked and is left alone.
+            scheduled_now = [w for w in store.find_scheduled_wallets(subject=subject) if w.id in locked]
+            _resolve_scheduled(store, scheduled_now, now, cancel=True)
             current = [
                 wallet
                 for wallet in store.find_wallets(
-                    subjects=[subject],
-                    wallet_types=[WalletType.GRANT, WalletType.CONSUMABLE],
-                    currencies=None,
-                    at=effective_date,
-                    lock=True,
+                    subjects=[subject], wallet_types=both_types, currencies=None, at=effective_date
                 )
-                if wallet.source == PLAN_SOURCE
+                if wallet.source == PLAN_SOURCE and wallet.id in locked
             ]
             kept: dict[int, Wallet] = {}
             for index, spec in enumerate(open_wallets):
@@ -829,16 +1133,61 @@ def cancel_scheduled_switch(store: Store, subjects: dict) -> int:
     now = utcnow()
     cancelled = 0
     with store.unit_of_work():
-        for subject in subjects.values():
-            if _resolve_scheduled(store, subject, now, cancel=True):
+        unique_subjects = list(dict.fromkeys(subjects.values()))
+        found = [w.id for subject in unique_subjects for w in store.find_scheduled_wallets(subject=subject)]
+        locked = _lock(store, found)
+        for subject in unique_subjects:
+            # Read under the locks; a wallet found only after locking was not locked and is left alone.
+            wallets = [w for w in store.find_scheduled_wallets(subject=subject) if w.id in locked]
+            if _resolve_scheduled(store, wallets, now, cancel=True):
                 cancelled += 1
     return cancelled
 
 
 def find_unattached_fulfillment_records(store: Store, older_than: datetime | None = None):
     """
-    Fulfillment records still holding a transaction with no domain object attached — quota that was
-    spent on something that may never have happened. A recovery job walks these and decides whether
-    to :func:`unfulfill` them.
+    Fulfillment records still holding a consumption entry with no domain object attached — quota
+    that was spent on something that may never have happened. A recovery job walks these and decides
+    whether to :func:`unfulfill` them. Credits and transfers are complete when written and never make
+    a record appear here.
     """
     return store.records_with_unattached_transactions(older_than=older_than)
+
+
+# -------------------------------------------------------------------------------------------------
+# Membership
+# -------------------------------------------------------------------------------------------------
+
+
+def groups_of(store: Store, subject: SubjectRef) -> list[SubjectRef]:
+    """
+    Every group ``subject`` is a member of, directly or through other groups: direct groups first,
+    then their groups, breadth-first, each group once. Terminates on cyclic data; ``subject`` itself
+    is never included.
+    """
+    return _expand(store, {"": subject})[""][1:]
+
+
+def add_member(store: Store, member: SubjectRef, group: SubjectRef) -> None:
+    """
+    Make ``member`` a direct member of ``group``. An existing membership is left as it is.
+
+    Membership changes are serialised (:meth:`~allowances.store.Store.lock_memberships`) so two
+    concurrent additions cannot form a cycle together. Raises
+    :class:`~allowances.errors.MembershipCycleError` when ``member`` is ``group`` or ``group`` is
+    already, directly or transitively, a member of ``member``.
+    """
+    with store.unit_of_work():
+        store.lock_memberships()
+        if member == group or member in groups_of(store, group):
+            raise MembershipCycleError(f"{member} cannot become a member of {group}: it would form a cycle")
+        if (member, group) in store.memberships_of(members=[member]):
+            return
+        store.add_membership(member=member, group=group)
+
+
+def remove_member(store: Store, member: SubjectRef, group: SubjectRef) -> bool:
+    """Remove the direct membership of ``member`` in ``group``. Returns whether it existed."""
+    with store.unit_of_work():
+        store.lock_memberships()
+        return store.remove_membership(member=member, group=group)

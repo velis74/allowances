@@ -48,6 +48,7 @@ class TransactionKind(models.TextChoices):
     GRANT = "grant", "Grant"
     CONSUMPTION = "consumption", "Consumption"
     STORNO = "storno", "Storno"
+    TRANSFER = "transfer", "Transfer"
 
 
 class SubjectFields(models.Model):
@@ -154,12 +155,15 @@ class FulfillmentRecord(models.Model):
 
 class Transaction(models.Model):
     """
-    One signed ledger entry: negative for consumption, positive for a grant or a storno.
+    One signed ledger entry: negative for a consumption or the source side of a transfer, positive
+    for a grant, a storno or the target side of a transfer, zero for the use of a right.
 
-    ``object_type``/``object_id`` are written in a second step. The transaction is created when the
-    quota is consumed; the domain object it paid for is attached once that operation actually
-    succeeds. A transaction left unattached is therefore a usable signal that something failed in
-    between.
+    ``object_type``/``object_id`` of a consumption are written in a second step. The transaction is
+    created when the quota is consumed; the domain object it paid for is attached once that
+    operation actually succeeds. A consumption left unattached is therefore a usable signal that
+    something failed in between.
+
+    ``actor_type``/``actor_id`` name the subject on whose behalf the entry was made, or are empty.
     """
 
     wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name="transactions")
@@ -184,6 +188,18 @@ class Transaction(models.Model):
     )
     object_type = models.CharField(max_length=NAME_MAX_LENGTH, blank=True)
     object_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH, blank=True)
+    actor_type = models.CharField(
+        max_length=NAME_MAX_LENGTH,
+        blank=True,
+        default="",
+        help_text="Lowercased 'app_label.modelname' of the subject on whose behalf the entry was made.",
+    )
+    actor_id = models.CharField(
+        max_length=SUBJECT_ID_MAX_LENGTH,
+        blank=True,
+        default="",
+        help_text="Primary key of the actor, as text. Empty when the entry has no actor.",
+    )
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -288,6 +304,8 @@ class TransactionArchive(models.Model):
     )
     object_type = models.CharField(max_length=NAME_MAX_LENGTH, blank=True)
     object_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH, blank=True)
+    actor_type = models.CharField(max_length=NAME_MAX_LENGTH, blank=True, default="")
+    actor_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH, blank=True, default="")
     original_created_at = models.DateTimeField()
     archived_at = models.DateTimeField(default=timezone.now)
 
@@ -301,3 +319,31 @@ class TransactionArchive(models.Model):
 
     def __str__(self):
         return f"TransactionArchive(transaction={self.original_transaction_id}, {self.amount})"
+
+
+class Membership(models.Model):
+    """
+    One subject's direct membership of a group. A group is an ordinary subject; groups may be
+    members of other groups. The engine rejects a membership that would close a cycle.
+    """
+
+    member_type = models.CharField(max_length=NAME_MAX_LENGTH)
+    member_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH)
+    group_type = models.CharField(max_length=NAME_MAX_LENGTH)
+    group_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["member_type", "member_id"]),
+            models.Index(fields=["group_type", "group_id"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["member_type", "member_id", "group_type", "group_id"],
+                name="allowances_membership_unique",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Membership({self.member_type}:{self.member_id} in {self.group_type}:{self.group_id})"

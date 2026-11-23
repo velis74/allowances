@@ -280,3 +280,11 @@ def test_a_wallet_absent_from_the_new_plan_is_closed(store, alice):
 
     assert store.get_wallet(credits_wallet.id).valid_until is None
     assert store.get_wallet(storage.id).valid_until is not None
+
+
+def test_a_subject_given_under_two_keys_is_switched_once(store, alice):
+    result = plan_switch(store, {"a": alice, "b": alice}, [WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("5"))])
+
+    live = [w for w in wallets_for_subject(store, alice) if w.valid_until is None]
+    assert len(live) == 1
+    assert [w.id for w in result] == [live[0].id]
