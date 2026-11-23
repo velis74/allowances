@@ -12,7 +12,7 @@ Every engine function takes `store` first. If you're on Django you probably want
 peek(store, feature, quantity, subjects, provider, at=None) -> FulfillmentResult
 ```
 
-Whether a request could be met. Runs the same planning walk as `fulfill` and writes nothing — no transactions, no fulfillment record, no balance changes.
+Whether a request could be met. Runs the same planning walk as `fulfill`, with `subjects` expanded by their groups, and writes nothing — no transactions, no fulfillment record, no balance changes. A [right](/guide/permissions) held by any expanded subject makes the answer satisfied.
 
 The answer is a snapshot, not a reservation. A concurrent caller can spend what it just told you was available.
 
@@ -20,19 +20,22 @@ The answer is a snapshot, not a reservation. A concurrent caller can spend what 
 
 ```python
 fulfill(store, feature, quantity, subjects, provider,
-        guid=None, allow_partial=False, at=None) -> FulfillmentResult
+        guid=None, allow_partial=False, at=None, *, actor=None) -> FulfillmentResult
 ```
 
-Consume the licence, writing one transaction per wallet drawn from.
+Consume the licence, writing one transaction per wallet drawn from. A wallet whose effective rate is 0 and whose balance is positive covers the rest of the request; its use is a `CONSUMPTION` entry of amount 0 and its balance is unchanged.
 
 | | |
 | --- | --- |
 | `feature` | Name of a feature the provider knows. |
 | `quantity` | How many units. Anything `Decimal(str(...))` accepts. |
-| `subjects` | `{name: SubjectRef}`. The names are what `fulfillment_order` refers to. |
+| `subjects` | `{name: SubjectRef}`. The names are what `fulfillment_order` refers to. Each subject is expanded with its transitive groups under the same name — see [Memberships](/guide/fulfillment-order#memberships). |
 | `guid` | Group this call with earlier ones under one record. `None` creates a fresh one. |
 | `allow_partial` | Keep whatever was available instead of raising. |
 | `at` | Treat this instant as "now" — validity windows, sliding windows, timestamps. |
+| `actor` | `SubjectRef` recorded on every entry. `None` records the only subject of `subjects` when it holds exactly one, otherwise no actor. The actor is the caller's subject, never a group it was expanded to. |
+
+Every candidate wallet is locked in one `lock_wallets` call before balances are read; an existing record named by `guid` is locked first. See [Lock order](#lock-order).
 
 Raises `InsufficientBalanceError` when the request can't be met in full and `allow_partial` is false. The whole call rolls back; the exception carries the result that *would* have been returned.
 
@@ -47,12 +50,16 @@ Point every not-yet-attached transaction under `guid` at the domain object it pa
 ### `unfulfill`
 
 ```python
-unfulfill(store, guid, at=None) -> None
+unfulfill(store, guid, at=None, *, actor=None) -> None
 ```
 
-Reverse everything under `guid` by writing matching storno entries. Nothing is deleted or edited.
+Reverse everything under `guid` — consumption, credits and transfers — by writing matching storno entries, each recorded with `actor` (who reversed it). Nothing is deleted or edited. A storno of a zero entry is zero.
 
 Idempotent — an already-reversed transaction is skipped. Transactions whose wallet has since been archived are skipped too. An unknown guid raises `RecordNotFoundError`.
+
+Reversing a transfer takes the amount back from its target. The check nets all of the record's stornos on the target, so consumption of the transferred amount under the same guid is given back first. When the target would end below zero (`max(effective_balance, 0)` plus that net change is negative) or has been archived, `InsufficientBalanceError` is raised and nothing is written. When the transfer's source has been archived, `WalletNotFoundError` is raised and nothing is written.
+
+The record is locked first, then every wallet its transactions touch, in one `lock_wallets` call.
 
 ### `plan_switch`
 
@@ -86,12 +93,36 @@ Open one wallet, valid from `effective_date` (default now). `source` is stored o
 
 ```python
 credit(store, wallet_id, amount, *, guid=None, obj: ObjectRef | None = None,
-       at=None) -> Transaction
+       actor: SubjectRef | None = None, at=None) -> Transaction
 ```
 
-Add a positive `amount` to a wallet's balance, as a `GRANT` transaction. `obj` attaches it to whatever paid for it. `guid` files it under a fulfillment record so `unfulfill(guid)` reverses it; such a record without `obj` is reported by `find_unattached_fulfillment_records`.
+Add a positive `amount` to a wallet's balance, as a `GRANT` transaction recorded with `actor`. `obj` attaches it to whatever paid for it. `guid` files it under a fulfillment record so `unfulfill(guid)` reverses it; an existing record is locked before the wallet.
 
 Raises `WalletNotFoundError` for an unknown or archived wallet, `UnsuitableWalletError` for a windowed wallet or one not valid at `at`, `ValueError` for an amount that is not positive.
+
+### `transfer`
+
+```python
+transfer(store, from_wallet_id, to_wallet_id, amount, *, guid=None,
+         obj: ObjectRef | None = None, actor: SubjectRef | None = None,
+         at=None) -> FulfillmentResult
+```
+
+Move a positive `amount` from one wallet to another of the same currency. Writes two `TRANSFER` transactions under one fulfillment record (`guid`, or a new one): a debit of `-amount` on the source and a credit of `amount` on the target, both recorded with `actor` and attached to `obj` when given. The wallet types may differ. A windowed wallet's stored allotment is not changed; the entries count in its window like any other. A source drained to zero is not archived.
+
+The source must hold the amount — `max(effective_balance, 0) >= amount`; overdraft is never used. Both wallets are locked in one `lock_wallets` call; an existing record named by `guid` is locked first.
+
+Returns a `FulfillmentResult` with `requested == granted == amount`, `satisfied=True`, `transactions=[debit, credit]` and the record's `guid`. `unfulfill(guid)` reverses both legs.
+
+Raises `ValueError` for an amount that is not positive, `WalletNotFoundError` for an unknown or archived wallet, `UnsuitableWalletError` for the same wallet on both sides, different currencies or a wallet not valid at `at`, and `InsufficientBalanceError` when the source does not hold the amount (its `result.granted` is what the source holds). Nothing is written when it raises.
+
+### `close_wallet`
+
+```python
+close_wallet(store, wallet_id, *, at=None) -> Wallet
+```
+
+End a wallet at `at` (default now) — revoke a right, close a budget. A scheduled plan-switch change already due at `at` is applied first. `valid_until` becomes `at` unless the wallet already ends earlier, and a scheduled switch record not yet effective is dropped. No ledger entry is written and the balance is unchanged; `archive_expired_wallets` archives the wallet later. Returns the closed wallet. Raises `WalletNotFoundError` for an unknown or archived wallet.
 
 ### `adjust_wallet`
 
@@ -107,7 +138,7 @@ Give a wallet that has an `allotment` a new one, with `ADJUST` arithmetic: a win
 consumed(store, wallet_id, since, until) -> Decimal
 ```
 
-Net amount drawn from a wallet in `[since, until]`: consumption minus reversals of consumption booked in that interval. Credits, adjustments and their reversals are not counted. The figure to bill for a [postpaid budget](/guide/credits-and-budgets#postpaid-budget).
+Net amount drawn from a wallet in `[since, until]`: consumption minus reversals of consumption booked in that interval. Credits, transfers, adjustments and their reversals are not counted. The figure to bill for a [postpaid budget](/guide/credits-and-budgets#postpaid-budget).
 
 ### `archive_expired_wallets`
 
@@ -123,7 +154,31 @@ Move wallets past their `valid_until` into the archive. Returns how many. Meant 
 find_unattached_fulfillment_records(store, older_than=None) -> list[FulfillmentRecord]
 ```
 
-Records holding a transaction that never got an object attached — quota spent on something that may never have happened. Pass `older_than` so in-flight operations aren't swept up.
+Records holding a `CONSUMPTION` transaction that never got an object attached — quota spent on something that may never have happened. Credits and transfers are complete when written and never make a record appear here. Pass `older_than` so in-flight operations aren't swept up.
+
+### `add_member`
+
+```python
+add_member(store, member: SubjectRef, group: SubjectRef) -> None
+```
+
+Make `member` a direct member of `group`. A group is any subject; groups may be members of groups. An existing membership is left as it is. Membership changes are serialised with `Store.lock_memberships()`, so two concurrent additions cannot form a cycle together. Raises `MembershipCycleError` when `member` is `group` or `group` is already, directly or transitively, a member of `member`.
+
+### `remove_member`
+
+```python
+remove_member(store, member: SubjectRef, group: SubjectRef) -> bool
+```
+
+Remove the direct membership of `member` in `group`. Returns whether it existed. Memberships through other groups are unaffected.
+
+### `groups_of`
+
+```python
+groups_of(store, subject: SubjectRef) -> list[SubjectRef]
+```
+
+Every group `subject` belongs to, directly or through other groups: breadth-first, each group once. Direct groups come first, in membership creation order; each further depth lists the groups of the previous depth's members in that depth's order, each member's groups in creation order. `subject` itself is not included. Terminates on cyclic data.
 
 ### `effective_balance`
 
@@ -132,6 +187,28 @@ effective_balance(store, wallet, at=None) -> Decimal
 ```
 
 The balance that governs decisions. For an ordinary wallet, its stored balance. For a [windowed](/guide/sliding-windows) one, the allotment plus every transaction inside the current window.
+
+### `effective_allowances`
+
+```python
+effective_allowances(store, subject: SubjectRef, *, at=None, wallet_types=None,
+                     currencies=None) -> list[Allowance]
+```
+
+What `subject` holds at `at` (default now): every live wallet of the subject and of every group in `groups_of(subject)`, of any currency and wallet type, each as an [`Allowance`](#allowance) with its holder, depth and effective balance. See [What a subject holds](/guide/concepts#what-a-subject-holds).
+
+| | |
+| --- | --- |
+| `wallet_types` | Iterable of `WalletType`. `None` reads both `GRANT` and `CONSUMABLE`. |
+| `currencies` | Iterable of currency names. `None` reads every currency. |
+
+The wallets of all those subjects are read in one `find_wallets` call, and only wallets valid at `at` are kept. A wallet with a scheduled plan-switch change due at `at` is returned with the change applied, without writing it. Wallets of every balance are listed, zero and negative included; filter on `balance` to keep what is held. The list is ordered by `depth`, then by the holder's position in `groups_of`, then in the store's wallet order.
+
+Locks nothing and writes nothing: like `peek`, the answer is a snapshot.
+
+### Lock order
+
+`fulfill`, `unfulfill`, `transfer`, `close_wallet`, `plan_switch`, `cancel_scheduled_switch` and `archive_expired_wallets` lock every wallet they use in one `Store.lock_wallets` call, which takes the locks in ascending wallet id, before reading the balances they rely on, and lock no further wallet afterwards. `credit` and `adjust_wallet` lock their one wallet with `get_wallet(..., lock=True)`. A fulfillment record is locked before its wallets. Two operations therefore never wait for each other in a cycle.
 
 ## Types
 
@@ -158,7 +235,9 @@ Same shape, for the object a fulfillment paid for.
 
 ### `Transaction`
 
-`id`, `wallet_id`, `kind`, `amount` (signed), `created_at`, `record_guid`, `feature`, `storno_of_id`, `obj`.
+`id`, `wallet_id`, `kind`, `amount` (signed), `created_at`, `record_guid`, `feature`, `storno_of_id`, `obj`, `actor`.
+
+`amount` is negative for consumption and for the debit leg of a transfer, positive for a grant and for the credit leg of a transfer, zero for the use of a right; a storno carries the negated amount of the entry it reverses. `actor` is the `SubjectRef` on whose behalf the entry was made, or `None`.
 
 ### `WalletSpec`
 
@@ -174,6 +253,17 @@ A wallet to open, without saying for whom. Used by `plan_switch` and `open_walle
 
 `REPLACE` closes the existing wallet and opens a new one. `ADJUST` keeps it and moves its balance by *new − old allotment*, possibly below zero. `TOP_UP` keeps it and adds only a positive difference; both record the new allotment. On a windowed wallet `ADJUST` and `TOP_UP` both set the per-window allotment to the new amount. A wallet without an allotment, or one whose windowed-ness differs from the spec's, is replaced.
 
+### `Allowance`
+
+One wallet a subject holds, directly or through a group, as `effective_allowances` returns it.
+
+| Field | Type | |
+| --- | --- | --- |
+| `wallet` | `Wallet` | the wallet as it is at `at`, with a due scheduled change applied |
+| `holder` | `SubjectRef` | the wallet's owner: the queried subject or one of its groups |
+| `depth` | `int` | 0 for the subject itself, 1 for a direct group, 2 for a group of a direct group, … |
+| `balance` | `Decimal` | `effective_balance` of the wallet at `at`; for a windowed wallet, the balance left in the current window |
+
 ### `FulfillmentResult`
 
 `requested`, `granted`, `satisfied`, `transactions`, `guid`, `modifier_applied`.
@@ -182,7 +272,7 @@ A wallet to open, without saying for whom. Used by `plan_switch` and `open_walle
 
 ### `WalletType` / `TransactionKind`
 
-`WalletType.GRANT` / `CONSUMABLE`. `TransactionKind.GRANT` / `CONSUMPTION` / `STORNO`. String enums, so they compare equal to their values. A `GRANT` transaction is a credit or a balance change made by a plan adjustment.
+`WalletType.GRANT` / `CONSUMABLE`. `TransactionKind.GRANT` / `CONSUMPTION` / `TRANSFER` / `STORNO`. String enums, so they compare equal to their values. A `GRANT` transaction is a credit or a balance change made by a plan adjustment; a `TRANSFER` transaction is one leg of `transfer`.
 
 ## Definitions
 
@@ -222,7 +312,7 @@ Reads the [configuration shape](/guide/concepts) from a dict. The Django adapter
 
 ## Store
 
-The storage port. See [How the port works](/backends/) for the obligations and [Writing a backend](/backends/writing-a-backend) for the full method list.
+The storage port. See [How the port works](/backends/) for the obligations, including the lock order and comparable wallet ids, and [Writing a backend](/backends/writing-a-backend) for the full method list.
 
 `allowances.store.Store` is a `runtime_checkable` `Protocol` — there is nothing to inherit.
 
@@ -231,11 +321,12 @@ The storage port. See [How the port works](/backends/) for the obligations and [
 | | |
 | --- | --- |
 | `AllowancesError` | Base class for everything below. |
-| `InsufficientBalanceError` | `fulfill` couldn't cover the request. Carries `.result`. |
+| `InsufficientBalanceError` | `fulfill` couldn't cover the request, a `transfer` source doesn't hold the amount, or `unfulfill` can't take a transfer back from its target. Carries `.result`. |
 | `DefinitionNotFoundError` | Unknown feature or currency. Also a `KeyError`. |
 | `RecordNotFoundError` | No fulfillment record with that guid. Also a `LookupError`. |
-| `WalletNotFoundError` | No live wallet with that id. Also a `LookupError`. |
-| `UnsuitableWalletError` | The wallet can't take the operation: `credit` on a windowed wallet or one not valid now, `adjust_wallet` without an allotment. Also a `ValueError`. |
+| `WalletNotFoundError` | No live wallet with that id, or `unfulfill` of a transfer whose source has been archived. Also a `LookupError`. |
+| `UnsuitableWalletError` | The wallet can't take the operation: `credit` on a windowed wallet or one not valid now, `adjust_wallet` without an allotment, `transfer` between different currencies, from a wallet to itself, or with a wallet not valid now. Also a `ValueError`. |
+| `MembershipCycleError` | `add_member` would make a subject a member of itself, directly or through other groups. |
 | `UnsupportedOperationError` | A backend deliberately doesn't implement this. Also a `NotImplementedError`. |
 
 ## Windows

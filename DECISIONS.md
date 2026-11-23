@@ -822,3 +822,163 @@ small and the record next to the state it changes.
 
 **Cost to revisit:** Medium. The record format is internal to the engine, but stored; changing it
 needs a data migration for pending switches.
+
+## 35. A rate-0 grant is a right, and each use is a zero-amount consumption entry
+
+**Dilemma:** A feature section may accept a currency at rate 0, and the engine's comment said such a
+wallet covers the remainder for free. In practice the zero cost hit the "nothing to draw" guard, so a
+rate-0 wallet never satisfied `peek` or `fulfill`. Rights (may edit members, may export) need exactly
+that shape: held, not spent. A use of a right also has to be auditable, which a check that writes
+nothing is not.
+
+**Decision:** A wallet whose effective rate (rate × modifier) is 0 and whose effective balance is
+positive covers the whole remaining quantity at cost 0. A balance of 0 or less means the right is not
+held; rate-0 wallets never take part in the overdraft pass. `peek` writes nothing; `fulfill` writes a
+`CONSUMPTION` entry of amount 0 under its fulfillment record, without saving or archiving the wallet;
+`unfulfill` writes `STORNO` entries of amount 0. A permanent right is a `GRANT` wallet at rate 0 with
+balance 1 and no `valid_until`; `valid_until` makes it temporary, `close_wallet` revokes it.
+
+**Reason:** No new wallet type or table: a right is a grant that costs nothing, and every existing
+mechanism (validity, fulfillment order, membership expansion, attach, unfulfill, the sweep) applies
+unchanged. The zero entry puts the use, its actor and its object on the ledger, which is the audit
+trail. Because the rule reads the effective rate, a modifier factor of 0 also makes a paid wallet
+cover the request for free.
+
+**Cost to revisit:** Low. Zero entries are ordinary rows; dropping them would only remove audit rows.
+
+## 36. Transfer is its own transaction kind, and its reversal needs the target to still hold the amount
+
+**Dilemma:** Funding one wallet from another (a guide's budget handed to tourists) could be written as
+a consumption on the source plus a `credit` on the target. That counts the move as consumption in
+`consumed()` billing, splits it over two records, and makes the recovery sweep treat it as abandoned
+until something is attached.
+
+**Decision:** `transfer(from, to, amount)` writes two `TransactionKind.TRANSFER` entries, debit and
+credit, under one fulfillment record. Same currency required, same wallet refused, amount positive,
+wallet types may differ. The source must hold the amount (`max(effective_balance, 0)`); overdraft is
+never used. `unfulfill` reverses both legs, and refuses with `InsufficientBalanceError`, writing
+nothing, when the target holds less than the amount or has been archived. When the source has been
+archived since, `unfulfill` raises `WalletNotFoundError` and writes nothing: skipping it, as for an
+archived wallet of a consumption, would take the amount from the target and return it nowhere. The sweep (`records_with_unattached_transactions`)
+considers only `CONSUMPTION` entries, which also stops it reporting `credit(guid=...)` without `obj`.
+`consumed()` counts a positive storno only when it reverses a consumption.
+
+**Reason:** A transfer moves value; it does not use it. Its own kind keeps it out of consumption
+figures and the sweep, and one record makes it reversible as a unit. Refusing a reversal the target
+cannot cover keeps the source from being refunded money that the target has already spent; returning
+the unspent part is a new transfer in the opposite direction.
+
+**Cost to revisit:** Medium. The kind is stored in ledgers, and the sweep change is a behaviour change
+for callers that relied on it for credits.
+
+## 37. One global lock order: every wallet an operation uses, locked in one `lock_wallets` call
+
+**Dilemma:** `fulfill` locked candidate wallets step by step in fulfillment order and `unfulfill` in
+transaction order. Two operations over the same wallets in opposite orders (user then team against
+team then user) deadlocked on PostgreSQL; `tests/django/test_lock_order.py` reproduces it.
+
+**Decision:** New port method `Store.lock_wallets(wallet_ids)`: locks the given live wallets in
+ascending id order and returns them in that order, without archived or unknown ids. An operation finds
+its wallets without locks, locks all of them in one call before reading the balances it relies on,
+and locks no further wallet afterwards. A fulfillment record is locked before its wallets (`unfulfill`,
+and `fulfill`, `credit`, `transfer` given an existing guid). `fulfill`, `unfulfill`, `transfer`,
+`close_wallet`, `plan_switch`, `cancel_scheduled_switch` and `archive_expired_wallets` follow it;
+`credit` and `adjust_wallet` lock their single wallet. Wallet ids of one store must be mutually
+comparable. `DjangoStore` implements it as `select_for_update()` ordered by id.
+
+**Reason:** A single total order over all locks is the standard way to rule out lock cycles, and
+ascending primary key is an order every store has. Locking the found candidates once and re-reading
+them under the lock keeps scheduled-switch settling and validity checks on fresh state.
+
+**Cost to revisit:** Medium. It is a required port method, and every new multi-wallet operation must
+keep the rule.
+
+## 38. The actor defaults to the only subject passed
+
+**Dilemma:** Once a group's wallet can pay for a member's use, the wallet's subject no longer says who
+acted. The ledger needs the actor on the entry, but most calls pass a single subject, and forcing every
+caller to repeat it is noise.
+
+**Decision:** `Transaction.actor: SubjectRef | None`, stored by `create_transaction(actor=)`
+(`actor_type` / `actor_id` on the Django models, copied on archival). `fulfill(actor=None)` records the
+single subject of `subjects` when it holds exactly one entry, before membership expansion; otherwise
+`None`. `credit`, `transfer` and `unfulfill` store the actor as given; storno entries carry the actor
+passed to `unfulfill` (who reversed it), not a copy of the original's.
+
+**Reason:** With one subject the actor is unambiguous; with several (user and team) guessing would
+record the wrong one half the time, so the caller says or nothing is recorded. Taking the subject
+before expansion keeps a group from ever appearing as the actor of a member's use.
+
+**Cost to revisit:** Low. The field is nullable and the default is a single line.
+
+## 39. Membership expands under the caller's key; cycles are rejected under one lock
+
+**Dilemma:** Rights and budgets of a team or organisation should reach its members without every
+caller passing every group. Groups may nest, and arbitrary nesting admits cycles, which a resolver
+must survive and an API should not create. Two concurrent additions can each pass a cycle check and
+together form a cycle.
+
+**Decision:** A group is an ordinary subject. Port methods `add_membership`, `remove_membership`,
+`memberships_of` (direct pairs, oldest first) and `lock_memberships`; Django model `Membership`.
+`add_member` takes `lock_memberships`, rejects `member == group` or a group already transitively a
+member of the member with `MembershipCycleError`, and treats an existing membership as a no-op.
+`groups_of` is breadth-first, deduplicated and terminates on cyclic data. `peek` and `fulfill` expand
+every caller-supplied subject under its own key into `[subject, depth-1 groups, depth-2 groups, ...]`;
+a step naming the key walks that list, a step without a subject walks all expanded subjects, a
+callable order and modifier lookup see all of them, and a wallet is drawn at most once. On PostgreSQL
+`lock_memberships` is `pg_advisory_xact_lock` on a fixed key; on SQLite the `IMMEDIATE` write lock
+already serialises writers.
+
+**Reason:** Expanding under the caller's key keeps every existing `fulfillment_order` meaningful: the
+user's own wallets still come first, the groups' after them, and without memberships nothing changes.
+Rejecting cycles at write time keeps the data acyclic (a DAG); tolerating them at read time keeps a
+corrupted table from hanging a request. An advisory lock serialises only membership writers, not the
+whole membership table.
+
+**Cost to revisit:** Medium. Expansion order is observable in which wallet pays; changing it changes
+charges.
+
+## 40. Django permissions are `perm:` features served by a provider, held by grant wallets
+
+**Dilemma:** Serving `has_perm` from wallets needs a mapping from `"app_label.codename"` to a feature
+and currency, and `get_all_permissions` needs the reverse. A settings dict per permission would
+duplicate every permission the project defines.
+
+**Decision:** Naming convention: the feature and the currency of permission `"app_label.codename"` are
+both `"perm:app_label.codename"` (`PERMISSION_PREFIX`, `permission_feature`). `PermissionProvider(base)`
+delegates to `base` and serves any undefined `perm:` name: a plain currency, and a feature with a grant
+section accepting that currency at rate 0 and fulfillment order `[("grant", None)]`. The shortcuts
+default to `PermissionProvider(SettingsProvider())`. `grant_permission` opens a balance-1 grant wallet
+with source `"permission"`; `revoke_permission` closes the subject's live wallets of that currency.
+`AllowancesBackend` reads the grant wallets of the user and of `groups_of(user)` valid now with a
+positive balance, maps currencies with the prefix back to permission names, gives an active superuser
+every `Permission`, and caches the set on the user object. It does not subclass `BaseBackend`, so
+importing the shortcuts does not require `django.contrib.auth`.
+
+**Reason:** The reverse mapping is the prefix itself, so `get_all_permissions` is one wallet query and
+no startup index. A `perm:` name a project does define in settings still wins, so a permission can be
+given a different order or currency. Grant-only keeps `has_perm` free of side effects: templates and
+admin lists call it on every render.
+
+**Cost to revisit:** Medium. The prefix is stored in wallet currencies; changing it needs a data
+migration.
+
+## 41. `effective_allowances` is the general read; Django permissions are a filter over it
+
+**Dilemma:** Showing where a user's Django permissions come from needs the holder and depth of every
+grant. A permissions-only query would answer that for `perm:` wallets and leave the same question —
+what a subject holds, and through which group — unanswered for budgets, credits and other rights.
+
+**Decision:** The core function `effective_allowances(store, subject, ...)` returns every live wallet of
+the subject and of `groups_of(subject)` as `Allowance(wallet, holder, depth, balance)`, in one
+`find_wallets` call, for any currency and wallet type, whatever the balance, ordered by depth, holder
+position and store order. `allowances_django.permissions.effective_permissions(allowances)` is a pure
+converter: grant allowances in a `perm:` currency with a positive balance, keyed by permission name.
+`AllowancesBackend` builds its permission set as the keys of the converter applied to the user's grant
+allowances.
+
+**Reason:** One read in the library's own terms serves budgets, rights and permissions alike, and works
+for any subject, not only users. Keeping the Django view as a filter means it cannot disagree with what
+the engine sees, and the balance filter stays with the caller, who may want empty wallets listed.
+
+**Cost to revisit:** Low. Both functions are reads; their result types are the public contract.

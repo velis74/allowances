@@ -14,6 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 
+from django.core.exceptions import ValidationError
 from django.db import connections, transaction as db_transaction
 from django.db.models import Q, Sum
 
@@ -30,11 +31,15 @@ from allowances.types import (
 from allowances_django.models import (
     FulfillmentRecord,
     LicenseModifier,
+    Membership,
     Transaction,
     TransactionArchive,
     Wallet,
     WalletArchive,
 )
+
+#: Key of the PostgreSQL transaction-level advisory lock that serialises membership changes.
+MEMBERSHIP_LOCK_KEY = 0x616C6C6F77616E63
 
 
 def _validity_q(at: datetime) -> Q:
@@ -47,6 +52,18 @@ def _subject_q(subjects: Sequence[SubjectRef]) -> Q:
     for subject in subjects:
         query |= Q(subject_type=subject.type, subject_id=subject.id)
     return query
+
+
+def _wallet_pks(wallet_ids) -> list:
+    """The wallet ids as primary-key values (``'5'`` and ``5`` are one id); ids that cannot be one are dropped."""
+    field = Wallet._meta.pk
+    pks = set()
+    for wallet_id in wallet_ids:
+        try:
+            pks.add(field.to_python(wallet_id))
+        except ValidationError:
+            continue
+    return list(pks)
 
 
 def _locked(qs):
@@ -105,6 +122,7 @@ def to_transaction(row: Transaction, record_guid: uuid.UUID | None = None) -> Co
         feature=row.feature,
         storno_of_id=row.storno_of_id,
         obj=ObjectRef(row.object_type, row.object_id) if row.object_type else None,
+        actor=SubjectRef(row.actor_type, row.actor_id) if row.actor_type else None,
     )
 
 
@@ -145,6 +163,17 @@ class DjangoStore:
 
     def unit_of_work(self):
         return db_transaction.atomic(using=self.using)
+
+    def _connection(self):
+        return connections[self.using or "default"]
+
+    def lock_wallets(self, wallet_ids: Sequence[object]) -> list[CoreWallet]:
+        ids = _wallet_pks(wallet_ids)
+        if not ids:
+            return []
+        # ORDER BY under FOR UPDATE makes PostgreSQL take the row locks in ascending id order.
+        qs = _locked(self._qs(Wallet).filter(pk__in=ids).order_by("id"))
+        return [to_wallet(row) for row in qs]
 
     # -- wallets -------------------------------------------------------------------------------
 
@@ -275,6 +304,8 @@ class DjangoStore:
                 feature=txn.feature,
                 object_type=txn.object_type,
                 object_id=txn.object_id,
+                actor_type=txn.actor_type,
+                actor_id=txn.actor_id,
                 original_created_at=txn.created_at,
             )
             copy.save(using=self.using)
@@ -324,6 +355,7 @@ class DjangoStore:
         feature: str = "",
         storno_of_id: object = None,
         at: datetime | None = None,
+        actor: SubjectRef | None = None,
     ) -> CoreTransaction:
         row = Transaction(
             wallet_id=wallet_id,
@@ -332,6 +364,8 @@ class DjangoStore:
             amount=Decimal(str(amount)),
             feature=feature,
             storno_of_id=storno_of_id,
+            actor_type=actor.type if actor is not None else "",
+            actor_id=actor.id if actor is not None else "",
         )
         if at is not None:
             row.created_at = at
@@ -365,7 +399,11 @@ class DjangoStore:
 
     def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> CoreRecord | None:
         qs = self._qs(FulfillmentRecord).filter(guid=guid)
-        if lock:
+        if lock and connections[qs.db].features.has_select_for_no_key_update:
+            # FOR NO KEY UPDATE: archiving a wallet inserts rows referencing the record, and their
+            # foreign-key check (FOR KEY SHARE) must not wait for a lock held across lock_wallets.
+            qs = qs.select_for_update(no_key=True)
+        elif lock:
             qs = _locked(qs)
         row = qs.first()
         if row is None:
@@ -374,7 +412,11 @@ class DjangoStore:
         return to_record(row)
 
     def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[CoreRecord]:
-        qs = self._qs(FulfillmentRecord).filter(transactions__object_type="").distinct()
+        qs = (
+            self._qs(FulfillmentRecord)
+            .filter(transactions__kind=str(TransactionKind.CONSUMPTION), transactions__object_type="")
+            .distinct()
+        )
         if older_than is not None:
             qs = qs.filter(created_at__lte=older_than)
         return [to_record(row) for row in qs.order_by("created_at", "id")]
@@ -391,3 +433,38 @@ class DjangoStore:
             .filter(_validity_q(at))
             .values_list("factor", flat=True)
         )
+
+    # -- memberships ---------------------------------------------------------------------------
+
+    def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
+        self._qs(Membership).get_or_create(
+            member_type=member.type, member_id=member.id, group_type=group.type, group_id=group.id
+        )
+
+    def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
+        deleted, _ = (
+            self._qs(Membership)
+            .filter(member_type=member.type, member_id=member.id, group_type=group.type, group_id=group.id)
+            .delete()
+        )
+        return deleted > 0
+
+    def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
+        if not members:
+            return []
+        query = Q()
+        for member in members:
+            query |= Q(member_type=member.type, member_id=member.id)
+        rows = self._qs(Membership).filter(query).order_by("created_at", "id")
+        return [(SubjectRef(row.member_type, row.member_id), SubjectRef(row.group_type, row.group_id)) for row in rows]
+
+    def lock_memberships(self) -> None:
+        """
+        On PostgreSQL, a transaction-level advisory lock held until the unit of work ends. Other
+        engines take no lock: SQLite's IMMEDIATE transactions already serialise every writer.
+        """
+        connection = self._connection()
+        if connection.vendor != "postgresql":
+            return
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [MEMBERSHIP_LOCK_KEY])

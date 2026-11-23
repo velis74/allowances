@@ -38,13 +38,23 @@ Some properties worth relying on:
 
 **Archived wallets are skipped.** If a wallet was drained to zero and [archived](/guide/plans-and-archival), it is gone from live storage and there is nothing left to credit. The call still succeeds.
 
+**The storno records who reversed it.** `unfulfill(guid, actor=support_agent)` puts that actor on every storno entry; the original entries keep theirs.
+
+## Reversing a transfer
+
+A [`transfer`](/guide/credits-and-budgets#moving-money-between-wallets) writes its debit and credit under one record, and `unfulfill(result.guid)` reverses both: the amount goes back to the source and comes out of the target.
+
+The target has to still hold it. The check nets every storno of the record on the target, so consumption paid from the transferred amount under the same guid is given back first. When the target's balance (`max(effective_balance, 0)`) plus that net change is below zero — some of the amount has been spent under another guid — or the target has been archived, `unfulfill` raises `InsufficientBalanceError` and writes nothing, for that transfer and for everything else under the same guid. Return the unspent part with a new `transfer` in the opposite direction instead.
+
+The source has to still exist. When it has been archived since — drained to zero by later consumption — there is no live wallet to give the amount back to: `unfulfill` raises `WalletNotFoundError` and writes nothing.
+
 ::: warning Reversing across a window boundary
 For a [sliding-window](/guide/sliding-windows) wallet, reverse inside the same window and the storno nets the consumption straight back out. Reverse after the window has passed and the original has already aged out — so the storno credits a window that never paid for anything. Keep recovery flows short relative to the window, or accept the drift knowingly.
 :::
 
 ## Finding what broke
 
-A transaction with no attached object is a fulfillment whose business operation may have died halfway:
+A consumption entry with no attached object is a fulfillment whose business operation may have died halfway. Credits and transfers are complete when written and never appear here:
 
 ```python
 from datetime import timedelta

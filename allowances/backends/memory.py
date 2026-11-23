@@ -44,6 +44,7 @@ class MemoryStore:
         self._transactions: dict[int, Transaction] = {}
         self._records: dict[uuid.UUID, FulfillmentRecord] = {}
         self._modifiers: list[Modifier] = []
+        self._memberships: list[tuple[SubjectRef, SubjectRef]] = []
         self.archived_wallets: list[Wallet] = []
         self.archived_transactions: list[Transaction] = []
 
@@ -51,7 +52,6 @@ class MemoryStore:
         self._transaction_ids = itertools.count(1)
         self._modifier_ids = itertools.count(1)
         self._lock = threading.RLock()
-        self._depth = 0
         # Distinguishes rows created within the same microsecond, so ordering stays deterministic
         # on clocks too coarse to separate them.
         self._sequence = itertools.count(1)
@@ -62,20 +62,18 @@ class MemoryStore:
     @contextmanager
     def unit_of_work(self):
         """
-        Atomic and re-entrant. The outermost block snapshots every collection and restores it if
-        anything raises; nested blocks join the outer one, exactly as a nested ``atomic()`` does.
+        Atomic and re-entrant. Every block snapshots every collection and restores it if anything
+        raises, so a nested block that raises discards only its own writes, like a nested
+        ``atomic()`` with its savepoint.
         """
         self._lock.acquire()
-        self._depth += 1
-        snapshot = self._snapshot() if self._depth == 1 else None
+        snapshot = self._snapshot()
         try:
             yield
         except BaseException:
-            if snapshot is not None:
-                self._restore(snapshot)
+            self._restore(snapshot)
             raise
         finally:
-            self._depth -= 1
             self._lock.release()
 
     def _snapshot(self):
@@ -85,6 +83,7 @@ class MemoryStore:
             dict(self._transactions),
             dict(self._records),
             list(self._modifiers),
+            list(self._memberships),
             list(self.archived_wallets),
             list(self.archived_transactions),
             dict(self._created_seq),
@@ -96,6 +95,7 @@ class MemoryStore:
             self._transactions,
             self._records,
             self._modifiers,
+            self._memberships,
             self.archived_wallets,
             self.archived_transactions,
             self._created_seq,
@@ -127,6 +127,9 @@ class MemoryStore:
             and wallet.is_valid_at(at)
         ]
         return sorted(found, key=lambda w: self._sort_key("wallet", w))
+
+    def lock_wallets(self, wallet_ids: Sequence[object]) -> list[Wallet]:
+        return [self._wallets[wallet_id] for wallet_id in sorted(set(wallet_ids)) if wallet_id in self._wallets]
 
     def get_wallet(self, wallet_id: object, *, lock: bool = False) -> Wallet | None:
         return self._wallets.get(wallet_id)
@@ -213,6 +216,7 @@ class MemoryStore:
         feature: str = "",
         storno_of_id: object = None,
         at: datetime | None = None,
+        actor: SubjectRef | None = None,
     ) -> Transaction:
         if storno_of_id is not None and any(t.storno_of_id == storno_of_id for t in self._transactions.values()):
             # The relational backends enforce this with a unique constraint; a lost race here would
@@ -227,6 +231,7 @@ class MemoryStore:
             record_guid=record_guid,
             feature=feature,
             storno_of_id=storno_of_id,
+            actor=actor,
         )
         self._transactions[txn.id] = txn
         self._created_seq[("transaction", txn.id)] = next(self._sequence)
@@ -257,11 +262,34 @@ class MemoryStore:
         return self._records.get(guid)
 
     def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[FulfillmentRecord]:
-        guids = {t.record_guid for t in self._transactions.values() if t.obj is None and t.record_guid is not None}
+        guids = {
+            t.record_guid
+            for t in self._transactions.values()
+            if t.kind == TransactionKind.CONSUMPTION and t.obj is None and t.record_guid is not None
+        }
         records = [self._records[g] for g in guids if g in self._records]
         if older_than is not None:
             records = [r for r in records if r.created_at <= older_than]
         return sorted(records, key=lambda r: (r.created_at, str(r.guid)))
+
+    # -- memberships ---------------------------------------------------------------------------
+
+    def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
+        if (member, group) not in self._memberships:
+            self._memberships.append((member, group))
+
+    def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
+        if (member, group) in self._memberships:
+            self._memberships.remove((member, group))
+            return True
+        return False
+
+    def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
+        member_set = set(members)
+        return [pair for pair in self._memberships if pair[0] in member_set]
+
+    def lock_memberships(self) -> None:
+        """A no-op: ``unit_of_work`` already holds the store-wide lock."""
 
     # -- modifiers -----------------------------------------------------------------------------
 

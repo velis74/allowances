@@ -12,6 +12,7 @@ from allowances.types import SubjectRef
 from allowances_django.models import (
     FulfillmentRecord,
     LicenseModifier,
+    Membership,
     Transaction,
     TransactionArchive,
     Wallet,
@@ -44,9 +45,9 @@ class FulfillmentRecordAdmin(admin.ModelAdmin):
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
-    list_display = ("id", "wallet", "kind", "amount", "feature", "created_at")
+    list_display = ("id", "wallet", "kind", "amount", "feature", "actor", "created_at")
     list_filter = ("kind", "feature")
-    search_fields = ("feature", "object_type", "object_id")
+    search_fields = ("feature", "object_type", "object_id", "actor_type", "actor_id")
     date_hierarchy = "created_at"
 
     def has_add_permission(self, request):
@@ -54,6 +55,35 @@ class TransactionAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+    @admin.display(description="Actor")
+    def actor(self, obj):
+        return f"{obj.actor_type}:{obj.actor_id}" if obj.actor_type else "-"
+
+
+@admin.register(Membership)
+class MembershipAdmin(admin.ModelAdmin):
+    """Read-only: memberships change through ``add_member`` and ``remove_member``, which reject cycles."""
+
+    list_display = ("id", "member", "group", "created_at")
+    search_fields = ("member_type", "member_id", "group_type", "group_id")
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    @admin.display(description="Member")
+    def member(self, obj):
+        resolved = resolve(SubjectRef(obj.member_type, obj.member_id))
+        return resolved if resolved is not None else f"{obj.member_type}:{obj.member_id}"
+
+    @admin.display(description="Group")
+    def group(self, obj):
+        resolved = resolve(SubjectRef(obj.group_type, obj.group_id))
+        return resolved if resolved is not None else f"{obj.group_type}:{obj.group_id}"
 
 
 @admin.register(LicenseModifier)

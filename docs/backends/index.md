@@ -2,13 +2,13 @@
 
 The engine does arithmetic. Deciding which wallets are candidates, walking them in order, converting at rates, rounding, running the overdraft pass, computing window balances — none of that needs to know what a database is.
 
-So it doesn't. The engine receives a **store** and talks to it through seventeen methods. Everything else is pure Python.
+So it doesn't. The engine receives a **store** and talks to it through twenty-two methods. Everything else is pure Python.
 
 ```
       your application
              │
              ▼
-   allowances.engine          peek · fulfill · attach · unfulfill · credit · plan_switch
+   allowances.engine          peek · fulfill · unfulfill · transfer · add_member · plan_switch
              │
      ┌───────┴────────┐
      ▼                ▼
@@ -24,13 +24,15 @@ Two seams, not one. The **store** is where state lives; the **provider** is wher
 
 ## What a store owes the engine
 
-The full interface is in [the API reference](/api/core#store). Three obligations are worth stating separately, because they are the ones that are easy to get subtly wrong:
+The full interface is in [the API reference](/api/core#store). Four obligations are worth stating separately, because they are the ones that are easy to get subtly wrong:
 
 **Ordering.** Wallets come back oldest-first, by `(created_at, id)`. The engine treats that order as the tie-breaker within a fulfillment step, so an unstable order means non-deterministic draws — the same request charging different wallets on different runs.
 
-**Atomicity.** `unit_of_work()` makes everything inside it commit together or not at all, and it must nest: the engine opens one, and a caller may already have opened another around it.
+**Atomicity.** `unit_of_work()` makes everything inside it commit together or not at all, and it must nest: the engine opens one, and a caller may already have opened another around it. A nested block that raises discards only its own writes.
 
-**Locking.** `lock=True` must stop a concurrent fulfillment from seeing the same rows until the block ends. Without it, two simultaneous calls can each read the same balance and each spend it. A backend that can't lock should say so in its documentation rather than pretend.
+**Locking.** `lock_wallets` and a locked read (`lock=True`) must stop a concurrent operation from changing the same rows until the block ends, and `lock_memberships` must serialise membership changes until it ends. Without them, two simultaneous calls can each read the same balance and each spend it, or two additions can together form a membership cycle. A backend that can't lock should say so in its documentation rather than pretend.
+
+**Lock order.** An engine operation locks all the wallets it uses in one `lock_wallets` call, before reading the balances it relies on, and locks no further wallet afterwards; a fulfillment record is locked before its wallets. `lock_wallets` takes its locks in ascending wallet id, so two operations never wait for each other in a cycle. That needs wallet ids of one store to be mutually comparable: integers, or strings, but not a mix.
 
 ## Why bother
 

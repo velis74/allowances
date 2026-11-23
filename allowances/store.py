@@ -1,20 +1,26 @@
 """
 The storage port.
 
-This is the whole surface the engine needs from persistence — seventeen methods. Implement it and
+This is the whole surface the engine needs from persistence — twenty-two methods. Implement it and
 the engine runs against your storage unchanged. Two implementations ship with the library:
 :class:`allowances.backends.memory.MemoryStore` and ``allowances_django.store.DjangoStore``.
 
-Two things every implementation owes the engine:
+Three things every implementation owes the engine:
 
 **Ordering.** Wallets come back oldest-first, by ``(created_at, id)``. The engine treats the order
 it receives as the tie-breaker within one ``fulfillment_order`` step, so an unstable order means
 non-deterministic draws.
 
-**Locking.** ``unit_of_work()`` must make everything inside it atomic, and ``lock=True`` must
-prevent a concurrent fulfillment from seeing the same rows until the block ends. Without both, two
+**Locking.** ``unit_of_work()`` must make everything inside it atomic, and a locked read must
+prevent a concurrent operation from changing the same rows until the block ends. Without both, two
 simultaneous ``fulfill()`` calls can each see the same balance and overdraw it. A backend that
 genuinely cannot lock should say so in its documentation rather than pretend.
+
+**Lock order.** An engine operation that locks wallets locks all of them in one
+:meth:`Store.lock_wallets` call, before reading the balances it relies on, and locks no further
+wallet afterwards. ``lock_wallets`` takes the locks in ascending wallet id, so two operations never
+wait for each other in a cycle. Wallet ids of one store must therefore be mutually comparable.
+A fulfillment record is locked before its wallets.
 
 A backend that cannot support an operation at all should raise
 :class:`allowances.errors.UnsupportedOperationError` rather than silently doing nothing.
@@ -50,7 +56,8 @@ class Store(Protocol):
     def unit_of_work(self) -> AbstractContextManager[None]:
         """
         Make everything inside the block atomic: it all commits, or none of it does. Must be safe
-        to nest — the engine opens one, and a caller may already have opened another around it.
+        to nest — the engine opens one, and a caller may already have opened another around it. A
+        nested block that raises discards its own writes and leaves the outer block's intact.
         """
         ...
 
@@ -71,6 +78,13 @@ class Store(Protocol):
 
         "Valid at" means ``valid_from`` is null or in the past *and* ``valid_until`` is null or in
         the future. Expired wallets are invisible to fulfillment.
+        """
+        ...
+
+    def lock_wallets(self, wallet_ids: Sequence[object]) -> list[Wallet]:
+        """
+        Lock the given live wallets in ascending id order and return their current state in that
+        order. Ids of archived or unknown wallets are omitted; a duplicated id is returned once.
         """
         ...
 
@@ -149,9 +163,11 @@ class Store(Protocol):
         feature: str = "",
         storno_of_id: object = None,
         at: datetime | None = None,
+        actor: SubjectRef | None = None,
     ) -> Transaction:
         """
-        Append a ledger entry. ``amount`` is signed.
+        Append a ledger entry. ``amount`` is signed; ``actor`` is the subject on whose behalf the
+        entry is made.
 
         A transaction may be stornoed at most once — a backend should enforce that with a
         uniqueness guarantee on ``storno_of_id`` rather than trusting callers, since a lost race
@@ -189,9 +205,31 @@ class Store(Protocol):
 
     def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[FulfillmentRecord]:
         """
-        Records holding at least one transaction that never got a domain object attached — a
-        fulfillment whose business operation may have died halfway. Feeds recovery jobs.
+        Records holding at least one ``CONSUMPTION`` transaction that never got a domain object
+        attached — a fulfillment whose business operation may have died halfway. Feeds recovery jobs.
+        Other kinds (credits, transfers) are complete when written and never make a record match.
         """
+        ...
+
+    # -- memberships ---------------------------------------------------------------------------
+
+    def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
+        """Record that ``member`` is a direct member of ``group``. The pair is stored at most once."""
+        ...
+
+    def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
+        """Remove the direct membership of ``member`` in ``group``. Returns whether it existed."""
+        ...
+
+    def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
+        """
+        Direct ``(member, group)`` pairs whose member is any of ``members``, ordered by creation,
+        oldest first.
+        """
+        ...
+
+    def lock_memberships(self) -> None:
+        """Serialise membership changes for the rest of the current unit of work."""
         ...
 
     # -- modifiers -----------------------------------------------------------------------------

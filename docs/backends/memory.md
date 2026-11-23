@@ -39,11 +39,13 @@ Not for production, and not close. State lives in a dict: it dies with the proce
 
 ## How it behaves
 
-**`unit_of_work()` is real.** The outermost block snapshots every collection and restores it if anything raises, so rollback genuinely rolls back. Nested blocks join the outer one, the way a nested `atomic()` does.
+**`unit_of_work()` is real.** Every block snapshots every collection and restores it if anything raises, so rollback genuinely rolls back. A nested block that raises discards only its own writes, the way a nested `atomic()` rolls back to its savepoint.
 
 **Ordering is deterministic.** Rows carry an insertion sequence alongside their timestamp, so wallets created within the same microsecond still come back in a stable order — otherwise tests would pass or fail depending on clock resolution.
 
 **Double-storno is refused.** The relational backends have a unique constraint; this one raises `ValueError`. A lost race there would silently refund twice, so it refuses just as loudly.
+
+**Locks are the store-wide lock.** `lock_wallets` returns the wallets in ascending id order without taking anything further, and `lock_memberships` does nothing: `unit_of_work` already holds the store's `RLock`. Memberships are rolled back with everything else.
 
 **Archiving works.** Archived wallets and transactions move to `store.archived_wallets` and `store.archived_transactions` rather than vanishing.
 

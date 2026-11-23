@@ -17,6 +17,7 @@ from django.db import IntegrityError, transaction as db_transaction
 from django.test import override_settings
 from django.utils import timezone
 
+from allowances.errors import InsufficientBalanceError
 from allowances.types import ObjectRef, SubjectRef, SwitchPolicy, TransactionKind, WalletSpec, WalletType
 from allowances_django import shortcuts
 from allowances_django.models import (
@@ -277,3 +278,97 @@ def test_the_archive_records_when_the_wallet_was_originally_created(alice, provi
     assert archive.original_created_at == wallet.created_at
     assert archive.subject_type == "auth.user"
     assert archive.subject_id == str(alice.pk)
+
+
+# -- transfer, close_wallet and the actor through the shortcuts -----------------------------------
+
+
+def _opened(subject, balance):
+    return shortcuts.open_wallet(
+        subject, WalletSpec(WalletType.CONSUMABLE, "credits", Decimal(balance)), source="budget"
+    )
+
+
+def test_shortcut_transfer_takes_wallet_rows_and_records_obj_and_actor(alice):
+    guide = User.objects.create(username="guide")
+    trip = User.objects.create(username="stands-in-for-a-trip")
+    budget = Wallet.objects.get(pk=_opened(guide, "100").id)
+    pocket = _opened(alice, "0")
+
+    result = shortcuts.transfer(budget, pocket, "10", obj=trip, actor=guide)
+
+    legs = Transaction.objects.filter(record__guid=result.guid).order_by("id")
+    assert [(t.wallet_id, t.kind, t.amount) for t in legs] == [
+        (budget.pk, TransactionKind.TRANSFER, Decimal("-10")),
+        (pocket.id, TransactionKind.TRANSFER, Decimal("10")),
+    ]
+    assert {(t.actor_type, t.actor_id) for t in legs} == {("auth.user", str(guide.pk))}
+    assert {(t.object_type, t.object_id) for t in legs} == {("auth.user", str(trip.pk))}
+    assert Wallet.objects.get(pk=pocket.id).balance == Decimal("10")
+
+
+def test_shortcut_transfer_takes_wallet_ids(alice):
+    guide = User.objects.create(username="guide")
+    budget, pocket = _opened(guide, "100"), _opened(alice, "0")
+
+    shortcuts.transfer(budget.id, pocket.id, "4")
+
+    assert Wallet.objects.get(pk=budget.id).balance == Decimal("96")
+    assert Wallet.objects.get(pk=pocket.id).balance == Decimal("4")
+
+
+def test_shortcut_close_wallet_takes_a_wallet_row(alice):
+    row = Wallet.objects.get(pk=_opened(alice, "5").id)
+    now = timezone.now()
+
+    closed = shortcuts.close_wallet(row, at=now)
+
+    assert closed.valid_until == now
+    assert Wallet.objects.get(pk=row.pk).valid_until == now
+    assert not Transaction.objects.filter(wallet_id=row.pk).exists()
+
+
+def test_shortcut_credit_and_unfulfill_record_a_model_actor(alice):
+    clerk = User.objects.create(username="clerk")
+    wallet = _opened(alice, "10")
+    guid = uuid.uuid4()
+
+    shortcuts.credit(wallet, "5", guid=guid, actor=alice)
+    shortcuts.unfulfill(guid, actor=clerk)
+
+    grant = Transaction.objects.get(kind=TransactionKind.GRANT)
+    storno = Transaction.objects.get(kind=TransactionKind.STORNO)
+    assert (grant.actor_type, grant.actor_id) == ("auth.user", str(alice.pk))
+    assert (storno.actor_type, storno.actor_id) == ("auth.user", str(clerk.pk))
+    assert Wallet.objects.get(pk=wallet.id).balance == Decimal("10")
+
+
+def _hand_out(guide_budget, tourist, guide):
+    with db_transaction.atomic():
+        pocket = shortcuts.open_wallet(
+            tourist, WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("0")), source="allowance"
+        )
+        shortcuts.transfer(guide_budget, pocket, Decimal("10"), actor=guide)
+    return pocket
+
+
+def test_the_hand_out_recipe_opens_and_funds_a_wallet(alice):
+    guide = User.objects.create(username="guide")
+    budget = _opened(guide, "15")
+
+    pocket = _hand_out(budget, alice, guide)
+
+    assert Wallet.objects.get(pk=pocket.id).balance == Decimal("10")
+    assert Wallet.objects.get(pk=budget.id).balance == Decimal("5")
+    assert Transaction.objects.filter(kind=TransactionKind.TRANSFER).count() == 2
+
+
+def test_the_hand_out_recipe_leaves_no_wallet_when_the_budget_is_short(alice):
+    guide = User.objects.create(username="guide")
+    budget = _opened(guide, "5")
+
+    with pytest.raises(InsufficientBalanceError):
+        _hand_out(budget, alice, guide)
+
+    assert list(Wallet.objects.values_list("pk", flat=True)) == [budget.id]
+    assert not Transaction.objects.exists()

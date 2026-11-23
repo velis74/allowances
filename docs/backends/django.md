@@ -32,7 +32,7 @@ fulfill(DjangoStore(using="billing"), "send_email", 1, subject_refs({"user": use
 
 ## Tables
 
-Six, all prefixed `allowances_` (the app label is `allowances`, not `allowances_django`):
+Seven, all prefixed `allowances_` (the app label is `allowances`, not `allowances_django`):
 
 | Table | Holds |
 | --- | --- |
@@ -40,6 +40,7 @@ Six, all prefixed `allowances_` (the app label is `allowances`, not `allowances_
 | `allowances_transaction` | The ledger |
 | `allowances_fulfillmentrecord` | One row per business operation |
 | `allowances_licensemodifier` | Cost modifiers |
+| `allowances_membership` | Direct memberships of subjects in groups |
 | `allowances_walletarchive` | Spent-out and expired wallets |
 | `allowances_transactionarchive` | Their entries |
 
@@ -68,9 +69,11 @@ resolve(SubjectRef(wallet.subject_type, wallet.subject_id))  # instance, or None
 
 ## Concurrency
 
-`unit_of_work()` is `transaction.atomic()`. `lock=True` is `select_for_update()` where the database has it.
+`unit_of_work()` is `transaction.atomic()`, and nests; a nested block that raises rolls back to its savepoint. `lock=True` and `lock_wallets` are `select_for_update()` where the database has it; `lock_wallets` orders by `id`, so PostgreSQL takes the row locks in ascending id order. A locked `get_record` is `FOR NO KEY UPDATE` on PostgreSQL: it still serialises operations on one record, but does not block the foreign-key check of a wallet's archival, which inserts archive rows referencing the record while holding that wallet's lock.
 
-`fulfill` locks every candidate wallet for the duration, so two simultaneous calls against the same wallet serialise rather than both spending the same balance. `unfulfill` locks the fulfillment record itself — locking only the rows would let two concurrent reversals each read the same not-yet-stornoed set. The unique constraint on `storno_of` is the backstop if that ever fails.
+`fulfill` locks every candidate wallet for the duration, so two simultaneous calls against the same wallet serialise rather than both spending the same balance. Every operation that locks wallets locks all of them in that one ordered statement before reading balances, so two operations over the same wallets — a `fulfill` walking user then team against one walking team then user, a transfer A→B against B→A — wait for each other instead of deadlocking. `unfulfill` locks the fulfillment record itself before its wallets and reads the record's transactions without row locks — locking only the rows would let two concurrent reversals each read the same not-yet-stornoed set, and locking them before the wallets would invert the order a wallet's archival takes when it deletes them. The unique constraint on `storno_of` is the backstop if that ever fails.
+
+`lock_memberships` takes `pg_advisory_xact_lock(MEMBERSHIP_LOCK_KEY)` on PostgreSQL, held until the transaction ends, so two concurrent `add_member` calls cannot each pass the cycle check and together form a cycle. On SQLite it takes nothing: the `IMMEDIATE` write lock already serialises them. Other databases take no lock.
 
 ## SQLite
 
@@ -108,7 +111,7 @@ Postgres for a deployment with concurrent writers across processes, where one gl
 
 ## Admin
 
-All six models are registered. Wallets and modifiers are editable; transactions and archives are read-only, deliberately.
+All seven models are registered. Wallets and modifiers are editable; transactions, memberships and archives are read-only, deliberately. Memberships change through `add_member` and `remove_member`, which reject cycles.
 
 Balances are meant to move through `fulfill` and `unfulfill`, each of which writes an entry explaining why. Editing a balance in the admin leaves a number that changed for no recorded reason — precisely the thing the ledger exists to prevent. If you need a manual correction, write a transaction for it.
 
