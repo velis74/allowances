@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Sequence
 
 from django.core.exceptions import ValidationError
-from django.db import connections, transaction as db_transaction
+from django.db import connections, IntegrityError, OperationalError, transaction as db_transaction
 from django.db.models import Q, Sum
 
 from allowances.types import (
@@ -28,6 +28,7 @@ from allowances.types import (
     WalletType,
 )
 from allowances_django.models import (
+    AllowancesLock,
     FulfillmentRecord,
     LicenseModifier,
     Membership,
@@ -37,8 +38,8 @@ from allowances_django.models import (
     WalletArchive,
 )
 
-#: Key of the PostgreSQL transaction-level advisory lock that serialises membership changes.
-MEMBERSHIP_LOCK_KEY = 0x616C6C6F77616E63
+#: Name of the :class:`~allowances_django.models.AllowancesLock` row that serialises membership changes.
+MEMBERSHIP_LOCK_NAME = "membership"
 
 
 def _validity_q(at: datetime) -> Q:
@@ -151,9 +152,6 @@ class DjangoStore:
     def unit_of_work(self):
         return db_transaction.atomic(using=self.using)
 
-    def _connection(self):
-        return connections[self.using or "default"]
-
     def lock_wallets(self, wallet_ids: Sequence[object]) -> list[CoreWallet]:
         ids = _wallet_pks(wallet_ids)
         if not ids:
@@ -250,7 +248,7 @@ class DjangoStore:
         return [to_wallet(row) for row in qs]
 
     def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[CoreWallet]:
-        qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lte=at).order_by("created_at", "id")
+        qs = self._qs(Wallet).filter(valid_until__isnull=False, valid_until__lt=at).order_by("created_at", "id")
         if lock:
             qs = _locked(qs)
         return [to_wallet(row) for row in qs]
@@ -444,11 +442,24 @@ class DjangoStore:
 
     def lock_memberships(self) -> None:
         """
-        On PostgreSQL, take a transaction-level advisory lock held until the unit of work ends. Other
-        backends take no lock; on SQLite, IMMEDIATE transactions serialise writers.
+        Lock the ``AllowancesLock`` row ``"membership"`` with ``SELECT ... FOR UPDATE`` until the unit of
+        work ends. On SQLite, IMMEDIATE transactions serialise writers and no row is locked.
+
+        Migration 0004 creates the row; a missing row (for example after the table was flushed) is created
+        in the unit of work. When a concurrent unit of work created it and the isolation level hides it
+        (REPEATABLE READ, SERIALIZABLE), :class:`~django.db.OperationalError` is raised; a retry succeeds.
         """
-        connection = self._connection()
-        if connection.vendor != "postgresql":
+        rows = self._qs(AllowancesLock).filter(name=MEMBERSHIP_LOCK_NAME)
+        if not connections[rows.db].features.has_select_for_update:
             return
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [MEMBERSHIP_LOCK_KEY])
+        if list(rows.select_for_update().values_list("pk", flat=True)):
+            return
+        try:
+            with db_transaction.atomic(using=rows.db):
+                self._qs(AllowancesLock).create(name=MEMBERSHIP_LOCK_NAME)
+        except IntegrityError:
+            # Created by a concurrent unit of work: wait for its lock.
+            if not list(rows.select_for_update().values_list("pk", flat=True)):
+                raise OperationalError(
+                    f"AllowancesLock row {MEMBERSHIP_LOCK_NAME!r} exists but is not visible in this transaction; retry."
+                ) from None

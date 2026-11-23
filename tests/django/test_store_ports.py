@@ -9,7 +9,6 @@ from decimal import Decimal
 import pytest
 
 from django.core.management import call_command
-from django.db import connection, transaction as db_transaction
 
 from allowances.types import ObjectRef, SubjectRef, TransactionKind, WalletType
 from allowances_django.models import Membership, Transaction, TransactionArchive
@@ -220,12 +219,3 @@ def test_lock_memberships_runs_inside_a_unit_of_work(store):
         store.add_membership(member=ALICE, group=EDITORS)
 
     assert store.memberships_of(members=[ALICE]) == [(ALICE, EDITORS)]
-
-
-@pytest.mark.skipif(connection.vendor != "postgresql", reason="the advisory lock exists only on PostgreSQL")
-def test_lock_memberships_holds_an_advisory_lock_until_the_transaction_ends(store):
-    with db_transaction.atomic():
-        store.lock_memberships()
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()")
-            assert cursor.fetchone()[0] == 1
