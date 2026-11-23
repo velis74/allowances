@@ -80,7 +80,7 @@ A subject's holding of one currency, of one type (grant or consumable). A subjec
 | Field | Meaning |
 | --- | --- |
 | `balance` | The amount it holds. For windowed wallets, see below. |
-| `valid_from` / `valid_until` | When it counts. Outside this range it is invisible to fulfilment. |
+| `valid_from` / `valid_until` | When it counts: from `valid_from` (inclusive) until `valid_until` (exclusive). Outside this range it is invisible to fulfilment. |
 | `overdraft_limit` | How far below zero it may go, or `None` for not at all. |
 | `first_overdraft_at` | When it first went negative. Set once, never cleared. |
 | `reset_config` | Makes it a [sliding-window](/guide/sliding-windows) wallet. |

@@ -80,8 +80,9 @@ persists `allotment` and `scheduled` along with `balance`, `first_overdraft_at`,
 takes `currencies=None` to mean every currency.
 
 **The store filters by validity.** `find_wallets` returns only wallets valid at `at`: `valid_from` null or not after
-`at`, `valid_until` null or not before `at`. The engine does not re-check. `find_expired_wallets` returns wallets whose
-`valid_until` is before `at`, so a wallet is never both valid and expired.
+`at`, `valid_until` null or after `at`. The engine does not re-check. `find_expired_wallets` returns wallets whose
+`valid_until` is at or before `at`, so from its `valid_from` on a wallet is either valid or expired, never both.
+`find_modifier_factors` uses the same interval: `valid_from` null or not after `at`, `valid_until` null or after `at`.
 
 **`storno_of` must be unique.** A transaction may be reversed at most once. The constraint belongs in storage, not
 in application code: a check in application code lets two concurrent reversals of one transaction both succeed and

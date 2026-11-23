@@ -162,7 +162,7 @@ from django.utils import timezone
 grant_permission(user, "club.view_report", valid_until=timezone.now() + timedelta(days=30))
 ```
 
-The permission is not held after `valid_until`; no scheduled job is needed. `valid_from=` starts a grant later.
+The permission is not held from `valid_until` on; no scheduled job is needed. `valid_from=` starts a grant later.
 
 ## Nested groups
 
