@@ -12,6 +12,8 @@ import os
 
 from pathlib import Path
 
+from tests.adorm_support import adorm_settings
+
 BASE_DIR = Path(__file__).resolve().parent
 
 SQLITE = dict(
@@ -59,6 +61,8 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.admin",
     "allowances_django",
+    # Configures adorm from ADORM on django.setup(), for the tests of allowances_adorm.
+    "adorm.contrib.django",
 ]
 
 # What django.contrib.admin requires; the admin tests call the ModelAdmin classes directly.
@@ -83,6 +87,9 @@ TEMPLATES = [
 ROOT_URLCONF = None
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# adorm profiles of the allowances_adorm tests (tests/adorm_support.py).
+ADORM = adorm_settings(DATABASES["default"])
 
 # Empty default; tests pass definitions with SettingsProvider(config=...).
 ALLOWANCES = {"currencies": {}, "features": {}}
