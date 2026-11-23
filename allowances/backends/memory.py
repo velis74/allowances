@@ -7,6 +7,12 @@ database.
 Not for production: state is held in process memory, lost when the process exits and not shared
 between processes. Locking is one process-local ``RLock`` held by ``unit_of_work``; ``lock=``
 arguments are ignored.
+
+Every method is a coroutine with a synchronous body and never suspends, so the store serves both the
+asynchronous API and :mod:`allowances.sync`. An engine call on an event loop runs without interleaving with
+other tasks. The ``RLock`` is re-entrant per thread: a caller's own ``unit_of_work`` block that awaits
+something suspending is not isolated from other tasks on the same thread, and its rollback also discards
+their writes made during the block.
 """
 
 from __future__ import annotations
@@ -15,7 +21,7 @@ import itertools
 import threading
 import uuid
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -57,8 +63,8 @@ class MemoryStore:
 
     # -- transactions / locking ----------------------------------------------------------------
 
-    @contextmanager
-    def unit_of_work(self):
+    @asynccontextmanager
+    async def unit_of_work(self):
         """
         Atomic and re-entrant. Each block snapshots every collection and restores it if the block
         raises; a nested block that raises discards only its own writes, as a nested ``atomic()``
@@ -104,7 +110,7 @@ class MemoryStore:
 
     # -- wallets -------------------------------------------------------------------------------
 
-    def find_wallets(
+    async def find_wallets(
         self,
         *,
         subjects: Sequence[SubjectRef],
@@ -126,17 +132,17 @@ class MemoryStore:
         ]
         return sorted(found, key=lambda w: self._sort_key("wallet", w))
 
-    def lock_wallets(self, wallet_ids: Sequence[object]) -> list[Wallet]:
+    async def lock_wallets(self, wallet_ids: Sequence[object]) -> list[Wallet]:
         return [self._wallets[wallet_id] for wallet_id in sorted(set(wallet_ids)) if wallet_id in self._wallets]
 
-    def get_wallet(self, wallet_id: object, *, lock: bool = False) -> Wallet | None:
+    async def get_wallet(self, wallet_id: object, *, lock: bool = False) -> Wallet | None:
         return self._wallets.get(wallet_id)
 
-    def save_wallet(self, wallet: Wallet) -> None:
+    async def save_wallet(self, wallet: Wallet) -> None:
         if wallet.id in self._wallets:
             self._wallets[wallet.id] = wallet
 
-    def create_wallet(
+    async def create_wallet(
         self,
         *,
         subject: SubjectRef,
@@ -170,15 +176,15 @@ class MemoryStore:
         self._created_seq[("wallet", wallet.id)] = next(self._sequence)
         return wallet
 
-    def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[Wallet]:
+    async def find_scheduled_wallets(self, *, subject: SubjectRef, lock: bool = False) -> list[Wallet]:
         found = [w for w in self._wallets.values() if w.subject == subject and w.scheduled]
         return sorted(found, key=lambda w: self._sort_key("wallet", w))
 
-    def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
+    async def find_expired_wallets(self, *, at: datetime, lock: bool = False) -> list[Wallet]:
         expired = [w for w in self._wallets.values() if w.valid_until is not None and w.valid_until <= at]
         return sorted(expired, key=lambda w: self._sort_key("wallet", w))
 
-    def archive_wallet(self, wallet: Wallet) -> None:
+    async def archive_wallet(self, wallet: Wallet) -> None:
         stored = self._wallets.pop(wallet.id, None)
         if stored is None:
             return
@@ -190,7 +196,7 @@ class MemoryStore:
 
     # -- ledger --------------------------------------------------------------------------------
 
-    def sum_transactions(self, *, wallet_id: object, since: datetime, until: datetime) -> Decimal:
+    async def sum_transactions(self, *, wallet_id: object, since: datetime, until: datetime) -> Decimal:
         return sum(
             (
                 t.amount
@@ -200,11 +206,13 @@ class MemoryStore:
             Decimal("0"),
         )
 
-    def transactions_for_wallet(self, *, wallet_id: object, since: datetime, until: datetime) -> list[Transaction]:
+    async def transactions_for_wallet(
+        self, *, wallet_id: object, since: datetime, until: datetime
+    ) -> list[Transaction]:
         found = [t for t in self._transactions.values() if t.wallet_id == wallet_id and since <= t.created_at <= until]
         return sorted(found, key=lambda t: self._sort_key("transaction", t))
 
-    def create_transaction(
+    async def create_transaction(
         self,
         *,
         wallet_id: object,
@@ -234,11 +242,11 @@ class MemoryStore:
         self._created_seq[("transaction", txn.id)] = next(self._sequence)
         return txn
 
-    def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[Transaction]:
+    async def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[Transaction]:
         found = [t for t in self._transactions.values() if t.record_guid == record_guid]
         return sorted(found, key=lambda t: self._sort_key("transaction", t))
 
-    def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
+    async def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         for txn_id in transaction_ids:
             txn = self._transactions.get(txn_id)
             if txn is not None:
@@ -246,7 +254,7 @@ class MemoryStore:
 
     # -- fulfilment records -------------------------------------------------------------------
 
-    def get_or_create_record(self, guid: uuid.UUID | None = None) -> FulfillmentRecord:
+    async def get_or_create_record(self, guid: uuid.UUID | None = None) -> FulfillmentRecord:
         if guid is None:
             guid = uuid.uuid4()
         record = self._records.get(guid)
@@ -255,10 +263,12 @@ class MemoryStore:
             self._records[guid] = record
         return record
 
-    def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> FulfillmentRecord | None:
+    async def get_record(self, guid: uuid.UUID, *, lock: bool = False) -> FulfillmentRecord | None:
         return self._records.get(guid)
 
-    def records_with_unattached_transactions(self, *, older_than: datetime | None = None) -> list[FulfillmentRecord]:
+    async def records_with_unattached_transactions(
+        self, *, older_than: datetime | None = None
+    ) -> list[FulfillmentRecord]:
         guids = {
             t.record_guid
             for t in self._transactions.values()
@@ -271,26 +281,26 @@ class MemoryStore:
 
     # -- memberships ---------------------------------------------------------------------------
 
-    def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
+    async def add_membership(self, *, member: SubjectRef, group: SubjectRef) -> None:
         if (member, group) not in self._memberships:
             self._memberships.append((member, group))
 
-    def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
+    async def remove_membership(self, *, member: SubjectRef, group: SubjectRef) -> bool:
         if (member, group) in self._memberships:
             self._memberships.remove((member, group))
             return True
         return False
 
-    def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
+    async def memberships_of(self, *, members: Sequence[SubjectRef]) -> list[tuple[SubjectRef, SubjectRef]]:
         member_set = set(members)
         return [pair for pair in self._memberships if pair[0] in member_set]
 
-    def lock_memberships(self) -> None:
+    async def lock_memberships(self) -> None:
         """A no-op: ``unit_of_work`` already holds the store-wide lock."""
 
     # -- modifiers -----------------------------------------------------------------------------
 
-    def add_modifier(
+    async def add_modifier(
         self,
         *,
         subject: SubjectRef,
@@ -311,7 +321,9 @@ class MemoryStore:
         self._modifiers.append(modifier)
         return modifier
 
-    def find_modifier_factors(self, *, feature: str, subjects: Sequence[SubjectRef], at: datetime) -> list[Decimal]:
+    async def find_modifier_factors(
+        self, *, feature: str, subjects: Sequence[SubjectRef], at: datetime
+    ) -> list[Decimal]:
         subject_set = set(subjects)
         return [
             m.factor

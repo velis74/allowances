@@ -71,3 +71,12 @@ class UnsupportedOperationError(AllowancesError, NotImplementedError):
     Example: a backend without an archive raises it from ``archive_wallet``, one without the scan
     from ``records_with_unattached_transactions``. See ``docs/backends/writing-a-backend.md``.
     """
+
+
+class StoreSuspendedError(AllowancesError, RuntimeError):
+    """
+    A call through :mod:`allowances.sync` suspended: the store awaited something that yields to an event
+    loop. ``allowances.sync`` needs a store whose methods never suspend, such as
+    :class:`~allowances.backends.memory.MemoryStore` or ``allowances_django.sync.store.DjangoStore``; a
+    store that suspends is used through the asynchronous API.
+    """
