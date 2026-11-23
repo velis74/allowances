@@ -1,6 +1,7 @@
 # Django backend
 
-The production backend. Relational, properly transactional, and it locks.
+Relational store over the Django ORM, transactional, with row locks where the database supports them. Intended for
+production.
 
 ```bash
 pip install "allowances[django]"
@@ -12,7 +13,8 @@ INSTALLED_APPS = ["allowances_django"]
 
 ## What you call
 
-Application code normally uses [the shortcuts](/api/django#shortcuts), which supply the store and provider for you and accept model instances as subjects:
+Application code normally uses [the shortcuts](/api/django#shortcuts), which supply the store and provider and accept
+model instances as subjects:
 
 ```python
 from allowances_django.shortcuts import fulfill
@@ -20,7 +22,7 @@ from allowances_django.shortcuts import fulfill
 fulfill("send_email", 1, {"user": request.user, "team": team})
 ```
 
-Drop to `DjangoStore` directly only when you need a second database or a custom provider:
+Use `DjangoStore` directly for a second database or a custom provider:
 
 ```python
 from allowances.engine import fulfill
@@ -46,17 +48,19 @@ Seven, all prefixed `allowances_` (the app label is `allowances`, not `allowance
 
 ## Why there is no ContentType
 
-Subjects are stored as two plain strings — `subject_type` holding `"app_label.modelname"`, `subject_id` holding the primary key as text — rather than as a `GenericForeignKey`.
+Subjects are stored as two plain strings, `subject_type` holding `"app_label.modelname"` and `subject_id` holding the
+primary key as text, not as a `GenericForeignKey`. Consequences:
 
-This buys three things:
+**The core does not depend on Django.** A `ContentType` foreign key would require it.
 
-**The core stays free of Django.** A `ContentType` foreign key would drag the ORM into the one place that must not have it.
+**Non-integer primary keys work.** Subjects keyed by UUID or slug are supported.
 
-**Non-integer primary keys work.** The old schema used a `PositiveBigIntegerField` for the object id, which quietly ruled out subjects keyed by UUID or slug.
+**No foreign key to `django_content_type`.** In a schema-per-tenant deployment, a foreign key from a per-tenant table
+to the shared content-type table can be created, but it breaks `TRUNCATE` of the shared table once a second schema
+exists, because PostgreSQL checks the constraint regardless of the connection's `search_path`.
 
-**Schema-per-tenant deployments stop fighting `django_content_type`.** A real foreign key from a per-tenant table to the shared content-type table is legal to create — Postgres doesn't care which schema either side lives in — but it breaks `TRUNCATE` of that shared table the moment a second schema exists, because Postgres considers the constraint regardless of the connection's `search_path`. The previous schema carried `db_constraint=False` on every such column to work around it. Now there is nothing to work around.
-
-The cost: `select_related` can't follow a subject, and a dangling reference isn't caught by the database. Resolve when you need the object:
+Limitations: `select_related` cannot follow a subject, and the database does not detect a dangling reference. Resolve
+the object when it is needed:
 
 ```python
 from allowances.types import SubjectRef
@@ -65,23 +69,37 @@ from allowances_django.subjects import resolve
 resolve(SubjectRef(wallet.subject_type, wallet.subject_id))  # instance, or None if deleted
 ```
 
-`None` rather than an exception, so an admin page can render an orphaned row instead of falling over on it.
+`resolve` returns `None` instead of raising, so an admin page can render an orphaned row.
 
 ## Concurrency
 
-`unit_of_work()` is `transaction.atomic()`, and nests; a nested block that raises rolls back to its savepoint. `lock=True` and `lock_wallets` are `select_for_update()` where the database has it; `lock_wallets` orders by `id`, so PostgreSQL takes the row locks in ascending id order. A locked `get_record` is `FOR NO KEY UPDATE` on PostgreSQL: it still serialises operations on one record, but does not block the foreign-key check of a wallet's archival, which inserts archive rows referencing the record while holding that wallet's lock.
+`unit_of_work()` is `transaction.atomic()` and nests; a nested block that raises rolls back to its savepoint.
+`lock=True` and `lock_wallets` are `select_for_update()` where the database has it; `lock_wallets` orders by `id`, so
+PostgreSQL takes the row locks in ascending id order. A locked `get_record` is `FOR NO KEY UPDATE` on PostgreSQL: it
+serialises operations on one record, but does not block the foreign-key check of a wallet's archival, which inserts
+archive rows referencing the record while holding that wallet's lock.
 
-`fulfill` locks every candidate wallet for the duration, so two simultaneous calls against the same wallet serialise rather than both spending the same balance. Every operation that locks wallets locks all of them in that one ordered statement before reading balances, so two operations over the same wallets — a `fulfill` walking user then team against one walking team then user, a transfer A→B against B→A — wait for each other instead of deadlocking. `unfulfill` locks the fulfillment record itself before its wallets and reads the record's transactions without row locks — locking only the rows would let two concurrent reversals each read the same not-yet-stornoed set, and locking them before the wallets would invert the order a wallet's archival takes when it deletes them. The unique constraint on `storno_of` is the backstop if that ever fails.
+`fulfill` locks every candidate wallet for the duration of the call, so two simultaneous calls against the same wallet
+are serialised and cannot both spend the same balance. Every operation that locks wallets locks all of them in that one
+ordered statement before reading balances, so two operations over the same wallets (a `fulfill` walking user then team
+against one walking team then user, a transfer A→B against B→A) wait for each other instead of deadlocking.
+`unfulfill` locks the fulfilment record before its wallets and reads the record's transactions without row locks:
+locking only the transaction rows would let two concurrent reversals read the same not-yet-stornoed set, and locking
+them before the wallets would invert the order a wallet's archival takes when it deletes them. The unique constraint
+on `storno_of` additionally rejects a second storno of the same transaction.
 
-`lock_memberships` takes `pg_advisory_xact_lock(MEMBERSHIP_LOCK_KEY)` on PostgreSQL, held until the transaction ends, so two concurrent `add_member` calls cannot each pass the cycle check and together form a cycle. On SQLite it takes nothing: the `IMMEDIATE` write lock already serialises them. Other databases take no lock.
+`lock_memberships` takes `pg_advisory_xact_lock(MEMBERSHIP_LOCK_KEY)` on PostgreSQL, held until the transaction ends,
+so two concurrent `add_member` calls cannot each pass the cycle check and together form a cycle. On SQLite it takes
+nothing: the `IMMEDIATE` write lock serialises them. Other databases take no lock.
 
 ## SQLite
 
-Supported, and tested the same way Postgres is — the concurrency suite in `tests/django/test_concurrency.py` runs on both and passes on both. Eight threads racing for the same wallet, released from a barrier together, get the balance granted exactly once.
+Supported. Under concurrent `fulfill` calls against one wallet the balance is granted once, as on PostgreSQL
+(`tests/django/test_concurrency.py` runs on both).
 
-It reaches that result by a different route. SQLite has no `SELECT ... FOR UPDATE` and never will, because it has nothing finer to offer than the single write lock it holds over the whole database. `lock=True` therefore compiles to a plain select there, and the guarantee the engine actually needs — that no second unit of work reads a balance this one is about to change — comes from the write lock covering the entire transaction instead. Coarser than row locking, and strictly stronger.
-
-That only holds if the transaction takes the write lock when it opens rather than when it first writes, which is one line of configuration:
+SQLite has no `SELECT ... FOR UPDATE`; its only lock is the database-wide write lock. `lock=True` compiles to a plain
+select, and the write lock, held for the whole transaction, prevents a second unit of work from reading a balance this
+one changes. This requires the transaction to take the write lock at `BEGIN`, not at its first write:
 
 ```python
 DATABASES = {
@@ -97,23 +115,37 @@ DATABASES = {
 }
 ```
 
-Leave `transaction_mode` out and the ledger is still correct — SQLite fails the second writer rather than committing it over a stale read — but the failure arrives as `OperationalError: database is locked` in the middle of a `fulfill`. `IMMEDIATE` turns that error into a wait. The app registers a system check, `allowances.W001`, that says so at startup rather than under load.
+Without `transaction_mode` the ledger stays correct, because SQLite fails the second writer instead of committing it
+over a stale read, but that writer gets `OperationalError: database is locked` during `fulfill`. With `IMMEDIATE` (or
+`EXCLUSIVE`) it waits up to `timeout` instead. System check `allowances.W001` warns at startup when an SQLite database
+uses neither mode.
 
-What SQLite genuinely gives up is decimal range, not correctness. It stores `DecimalField` as a float and Django rounds back to the field's six decimal places, which is exact to about fifteen significant digits: every amount up to `999999999.999999` survives the round trip untouched, and `tests/django/test_decimal_precision.py` holds both engines to that. Past it the low digits go — quietly at first (`1234567890.123456` comes back as `1234567890.123460`), then as `decimal.InvalidOperation` once the rounded value no longer fits the column. Postgres is exact across all twenty digits. Balances above a billion are a real reason to choose it; the ones this page used to give were not.
+SQLite limits decimal range. It stores `DecimalField` as a float, which Django rounds to the field's six decimal
+places; this is exact to about fifteen significant digits. Amounts up to `999999999.999999` are read back exactly
+(`tests/django/test_decimal_precision.py`). Larger amounts lose low digits (`1234567890.123456` is read back as
+`1234567890.123460`) and raise `decimal.InvalidOperation` once the rounded value no longer fits the column. PostgreSQL
+is exact for all twenty digits; use it for balances above 10^9.
 
 ::: tip Which to use
-Postgres for a deployment with concurrent writers across processes, where one global write lock becomes the bottleneck. SQLite for single-process deployments, embedded and desktop installs, small services, and every test suite that would rather not run a database server.
+PostgreSQL for deployments with concurrent writers across processes, where one database-wide write lock limits
+throughput. SQLite for single-process deployments, embedded and desktop installs, small services and test suites
+without a database server.
 :::
 
 ## Timestamps are settable
 
-`created_at` on wallets and transactions uses `default=timezone.now` rather than `auto_now_add`, so the store can place a row at a specific instant. That is what makes `at=` work end to end — testing a [sliding window](/guide/sliding-windows) without waiting a day, or backfilling history at its real timestamps.
+`created_at` on wallets and transactions uses `default=timezone.now`, not `auto_now_add`, so the store can write a row
+at a given instant. `at=` therefore sets the stored timestamp, e.g. for testing a
+[sliding window](/guide/sliding-windows) or backfilling history at its real timestamps.
 
 ## Admin
 
-All seven models are registered. Wallets and modifiers are editable; transactions, memberships and archives are read-only, deliberately. Memberships change through `add_member` and `remove_member`, which reject cycles.
+All seven models are registered. Wallets and modifiers are editable; transactions, memberships and archives are
+read-only. Memberships change through `add_member` and `remove_member`, which reject cycles.
 
-Balances are meant to move through `fulfill` and `unfulfill`, each of which writes an entry explaining why. Editing a balance in the admin leaves a number that changed for no recorded reason — precisely the thing the ledger exists to prevent. If you need a manual correction, write a transaction for it.
+After a wallet is opened, the engine changes its balance only through operations that write ledger entries
+(`fulfill`, `unfulfill`, `credit`, `transfer`, `adjust_wallet`, a `plan_switch` adjustment). Editing a balance in the
+admin changes it without a ledger entry; make corrections through those operations.
 
 ## Multiple databases
 
