@@ -5,7 +5,12 @@ description: 'Install allowances, declare features and currencies, pick the in-m
 # Getting started
 
 The core needs no web framework. The engine is plain Python that works against the [store](/backends/) passed to
-it, so the code below runs in a script, a Celery worker, a FastAPI handler or a Django view.
+it, so the code below runs wherever an event loop runs: an asynchronous Django view, a FastAPI handler or
+`asyncio.run` in a script.
+
+Every function that reads or writes state is a coroutine, called with `await`. Synchronous code (a Celery task, a
+synchronous Django view) imports the same names from `allowances.sync` and `allowances_django.sync.shortcuts`; see
+[Synchronous API](/guide/synchronous).
 
 Every call needs:
 
@@ -29,7 +34,7 @@ pip install "allowances[django]"
 
 :::
 
-The core has no dependencies. The `django` extra adds Django and the ORM-backed store.
+The core has no dependencies. The `django` extra adds Django and the ORM-backed stores.
 
 ::: code-group
 
@@ -48,7 +53,7 @@ INSTALLED_APPS = [
 ]
 
 # then: python manage.py migrate
-# Seven tables appear, prefixed `allowances_`.
+# Eight tables appear, prefixed `allowances_`.
 ```
 
 :::
@@ -131,7 +136,8 @@ subjects = {"user": user, "team": team}
 
 ```python [Django]
 # Pass the model instances you already have; the adapter makes the refs.
-subjects = {"user": request.user, "team": team}
+user = await request.auser()
+subjects = {"user": user, "team": team}
 ```
 
 :::
@@ -151,7 +157,7 @@ from decimal import Decimal
 
 from allowances import WalletSpec, WalletType, plan_switch
 
-plan_switch(
+await plan_switch(
     store,
     {"user": user},
     [
@@ -167,8 +173,8 @@ from decimal import Decimal
 from allowances import WalletSpec, WalletType
 from allowances_django.shortcuts import plan_switch
 
-plan_switch(
-    {"user": request.user},
+await plan_switch(
+    {"user": user},
     [
         WalletSpec(WalletType.CONSUMABLE, "email_send", Decimal("200")),
         WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("50")),
@@ -191,7 +197,7 @@ and funded with `credit`; see [Credits and budgets](/guide/credits-and-budgets).
 from allowances import InsufficientBalanceError, fulfill
 
 try:
-    result = fulfill(store, "send_email", 1, subjects, provider)
+    result = await fulfill(store, "send_email", 1, subjects, provider)
 except InsufficientBalanceError as exc:
     raise RuntimeError(f"Only {exc.result.granted} left")
 ```
@@ -201,7 +207,7 @@ from allowances import InsufficientBalanceError
 from allowances_django.shortcuts import fulfill
 
 try:
-    result = fulfill("send_email", 1, subjects)
+    result = await fulfill("send_email", 1, subjects)
 except InsufficientBalanceError as exc:
     return http_402(f"Only {exc.result.granted} left")
 ```
@@ -230,14 +236,14 @@ Fulfilment runs before the operation: the quota is consumed, then the email is s
 from allowances import ObjectRef, attach
 
 message = send_the_email()
-attach(store, result.guid, ObjectRef("message", message.id))
+await attach(store, result.guid, ObjectRef("message", message.id))
 ```
 
 ```python [Django]
 from allowances_django.shortcuts import attach
 
 message = send_the_email()
-attach(result.guid, message)
+await attach(result.guid, message)
 ```
 
 :::
@@ -254,13 +260,13 @@ If the operation fails, `unfulfill` reverses it:
 ```python [Core]
 from allowances import unfulfill
 
-unfulfill(store, result.guid)
+await unfulfill(store, result.guid)
 ```
 
 ```python [Django]
 from allowances_django.shortcuts import unfulfill
 
-unfulfill(result.guid)
+await unfulfill(result.guid)
 ```
 
 :::
@@ -275,14 +281,14 @@ its reversal. A second call for the same `guid` writes nothing.
 ```python [Core]
 from allowances import peek
 
-if peek(store, "send_email", 10, {"user": user}, provider).satisfied:
+if (await peek(store, "send_email", 10, {"user": user}, provider)).satisfied:
     show_the_bulk_send_button()
 ```
 
 ```python [Django]
 from allowances_django.shortcuts import peek
 
-if peek("send_email", 10, {"user": request.user}).satisfied:
+if (await peek("send_email", 10, {"user": user})).satisfied:
     show_the_bulk_send_button()
 ```
 

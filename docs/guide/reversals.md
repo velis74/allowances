@@ -9,9 +9,9 @@ Three functions handle this: `attach` records success, `unfulfill` reverses a fa
 ## Attach: recording what it paid for
 
 ```python
-result = fulfill("send_email", 1, {"user": user})
+result = await fulfill("send_email", 1, {"user": user})
 message = send_the_email()
-attach(result.guid, message)
+await attach(result.guid, message)
 ```
 
 `attach` points every not-yet-attached transaction under that guid at the object. It leaves already-attached ones
@@ -22,7 +22,7 @@ The recovery sweep treats a consumption entry without an attached object as a po
 ## Unfulfill
 
 ```python
-unfulfill(result.guid)
+await unfulfill(result.guid)
 ```
 
 Nothing is deleted and nothing is edited. Each original entry gets a matching `storno` entry of the opposite sign,
@@ -87,8 +87,8 @@ from allowances_django.shortcuts import find_unattached_fulfillment_records, unf
 # Records unattached for over an hour count as failed.
 cutoff = timezone.now() - timedelta(hours=1)
 
-for record in find_unattached_fulfillment_records(older_than=cutoff):
-    unfulfill(record.guid)
+for record in await find_unattached_fulfillment_records(older_than=cutoff):
+    await unfulfill(record.guid)
 ```
 
 `older_than` excludes operations still in progress; set it above the longest duration of the operation.

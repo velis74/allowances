@@ -4,7 +4,7 @@ export default defineConfig({
   title: 'allowances',
   description:
     'Python grants and consumable budgets, checked before an operation and recorded in an append-only ledger, ' +
-    'and an alternative permissions implementation. Storage-agnostic, with a Django backend.',
+    'and an alternative permissions implementation. Async-first and storage-agnostic, with Django and adorm backends.',
   lastUpdated: true,
 
   transformHead({ pageData, siteConfig }) {
@@ -41,6 +41,7 @@ export default defineConfig({
             { text: 'Credits and budgets', link: '/guide/credits-and-budgets' },
             { text: 'Rights and permissions', link: '/guide/permissions' },
             { text: 'Permissions quick start', link: '/guide/permissions-quick-start' },
+            { text: 'Synchronous API', link: '/guide/synchronous' },
           ],
         },
         {
@@ -54,6 +55,7 @@ export default defineConfig({
           items: [
             { text: 'How the port works', link: '/backends/' },
             { text: 'Django', link: '/backends/django' },
+            { text: 'adorm', link: '/backends/adorm' },
             { text: 'In-memory', link: '/backends/memory' },
             { text: 'Writing a backend', link: '/backends/writing-a-backend' },
             { text: 'Redis as a backend', link: '/backends/redis' },

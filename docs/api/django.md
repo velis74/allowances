@@ -11,8 +11,9 @@ before models are ready, so a model import there would break startup. Use
 
 ## Shortcuts
 
-`allowances_django.shortcuts`: the [core engine](/api/core#engine) functions with the store and provider supplied.
-Subjects may be model instances.
+`allowances_django.shortcuts`: the [core engine](/api/core#engine) functions with the store and provider supplied, as
+coroutine functions. Subjects may be model instances. [`allowances_django.sync.shortcuts`](#synchronous-modules) has
+the same functions as plain functions.
 
 ```python
 from allowances_django.shortcuts import (
@@ -24,32 +25,33 @@ from allowances_django.shortcuts import (
 ```
 
 ```python
-peek(feature, quantity, subjects, *, provider=None, at=None, store=None)
-fulfill(feature, quantity, subjects, *, guid=None, allow_partial=False,
-        actor=None, provider=None, at=None, store=None)
-attach(guid, obj, *, store=None)
-unfulfill(guid, *, at=None, actor=None, store=None)
-plan_switch(subjects, open_wallets, effective_date=None, *, store=None)
-cancel_scheduled_switch(subjects, *, store=None)
-open_wallet(subject, spec, *, source, effective_date=None, store=None)
-credit(wallet, amount, *, guid=None, obj=None, actor=None, at=None, store=None)
-transfer(from_wallet, to_wallet, amount, *, guid=None, obj=None, actor=None,
-         at=None, store=None)
-adjust_wallet(wallet, allotment, *, at=None, store=None)
-close_wallet(wallet, *, at=None, store=None)
-consumed(wallet, since, until, *, store=None)
-archive_expired_wallets(at=None, *, store=None)
-find_unattached_fulfillment_records(older_than=None, *, store=None)
-add_member(member, group, *, store=None)
-remove_member(member, group, *, store=None) -> bool
-groups_of(obj, *, store=None) -> list
-effective_allowances(subject, *, at=None, wallet_types=None, currencies=None,
-                     store=None) -> list[Allowance]
+async def peek(feature, quantity, subjects, *, provider=None, at=None, store=None)
+async def fulfill(feature, quantity, subjects, *, guid=None, allow_partial=False,
+                  actor=None, provider=None, at=None, store=None)
+async def attach(guid, obj, *, store=None)
+async def unfulfill(guid, *, at=None, actor=None, store=None)
+async def plan_switch(subjects, open_wallets, effective_date=None, *, store=None)
+async def cancel_scheduled_switch(subjects, *, store=None)
+async def open_wallet(subject, spec, *, source, effective_date=None, store=None)
+async def credit(wallet, amount, *, guid=None, obj=None, actor=None, at=None, store=None)
+async def transfer(from_wallet, to_wallet, amount, *, guid=None, obj=None, actor=None,
+                   at=None, store=None)
+async def adjust_wallet(wallet, allotment, *, at=None, store=None)
+async def close_wallet(wallet, *, at=None, store=None)
+async def consumed(wallet, since, until, *, store=None)
+async def archive_expired_wallets(at=None, *, store=None)
+async def find_unattached_fulfillment_records(older_than=None, *, store=None)
+async def add_member(member, group, *, store=None)
+async def remove_member(member, group, *, store=None) -> bool
+async def groups_of(obj, *, store=None) -> list
+async def effective_allowances(subject, *, at=None, wallet_types=None, currencies=None,
+                               store=None) -> list[Allowance]
 ```
 
 `subjects`, `subject`, `member`, `group`, `actor` and `obj` take model instances or refs, interchangeably. `wallet`,
-`from_wallet` and `to_wallet` take a `Wallet` value, a `Wallet` row or its id. `store=` targets another database;
-`provider=` replaces the definition source, e.g. per-tenant configuration assembled per request. The default provider
+`from_wallet` and `to_wallet` take a `Wallet` value, a `Wallet` row or its id. `store=` replaces the default store,
+`settings.ALLOWANCES_STORE` (see [Settings](#settings)), e.g. for another database; `provider=` replaces the
+definition source, e.g. per-tenant configuration assembled per request. The default provider
 is `PermissionProvider(SettingsProvider())`: `settings.ALLOWANCES` plus the [`perm:` features](#permissions).
 
 `groups_of` returns the groups as model instances, nearest first; a group whose reference resolves to no existing
@@ -61,9 +63,17 @@ every live wallet of `subject` (a model instance or a `SubjectRef`) and of its g
 result into Django permissions.
 
 ```python
-result = fulfill("send_email", 1, {"user": request.user, "team": team})
-attach(result.guid, message)
+result = await fulfill("send_email", 1, {"user": user, "team": team})
+await attach(result.guid, message)
 ```
+
+```python
+get_store(store=None) -> Store
+get_provider(provider=None) -> DefinitionProvider
+```
+
+`get_store` returns `store`, or a new store from `settings.ALLOWANCES_STORE`; `get_provider` returns `provider`, or the
+default provider.
 
 ## Subjects
 
@@ -80,18 +90,36 @@ resolve(ref) -> Model | None        # ref -> instance, or None if gone
 and `TypeError` for an object that is not a model instance.
 
 `resolve` returns `None` instead of raising when the object has been deleted or its model does not exist; the
-references are not enforced by the database.
+references are not enforced by the database. It queries the database synchronously; asynchronous code calls
+`await store.resolve(ref)` on a Django store.
 
-## Store
+## Stores
 
-`allowances_django.store`
+Two stores over the ORM with the same queries (`allowances_django.queries.DjangoQueries`) and the same constructor;
+[Two stores](/backends/django#two-stores) describes their execution.
 
 ```python
-DjangoStore(using: str | None = None)
+allowances_django.store.DjangoStore(using: str | None = None)        # the asynchronous API
+allowances_django.sync.store.DjangoStore(using: str | None = None)   # the synchronous API, never suspends
 ```
 
-A [Store](/backends/) over the ORM. `using` routes every query to that database alias. It holds no connection, only a
-cache mapping fulfilment record guids to primary keys.
+A [Store](/backends/). `using` routes every query to that database alias (`None`: the default database); the `using`
+property returns it. A store holds no connection, only a cache mapping fulfilment record guids to primary keys.
+
+The asynchronous store runs a call outside a unit of work through `sync_to_async`, and everything inside
+`async with store.unit_of_work():` on one thread of that unit of work, where `atomic()` is entered and exited and whose
+connections are closed when the block ends. Called without a running event loop it raises `StoreSuspendedError`. The
+synchronous store runs every query on the calling thread; its `unit_of_work()` is `transaction.atomic()`.
+
+Besides the port, both have two coroutine methods the shortcuts use:
+
+```python
+async def resolve(ref) -> Model | None
+async def live_wallet_ids(*, subject, wallet_type, currency, at) -> list
+```
+
+`resolve` is [`subjects.resolve`](#subjects). `live_wallet_ids` returns, ascending, the ids of the live wallets of
+`subject` with that type and currency whose `valid_until` is empty or after `at`, wallets not yet valid included.
 
 `lock_wallets` is `select_for_update()` ordered by `id` where the database has it. `lock_memberships` locks the
 `AllowancesLock` row `MEMBERSHIP_LOCK_NAME` (`"membership"`) with `select_for_update()`. A missing row is created in
@@ -99,7 +127,8 @@ the current transaction; when a concurrent transaction created it and the isolat
 SERIALIZABLE), `lock_memberships` raises `django.db.OperationalError` and a retry succeeds. See
 [Concurrency](/backends/django#concurrency).
 
-Row-to-value converters, for reports written against the models:
+Row-to-value converters, for reports written against the models (`allowances_django.store`, also
+`allowances_django.queries`):
 
 ```python
 to_wallet(row) -> Wallet
@@ -128,8 +157,8 @@ PERMISSION_PREFIX = "perm:"
 PERMISSION_SOURCE = "permission"
 permission_feature(perm) -> str
 PermissionProvider(base: DefinitionProvider | None = None)
-grant_permission(subject, perm, *, valid_from=None, valid_until=None, store=None) -> Wallet
-revoke_permission(subject, perm, *, at=None, store=None) -> int
+async def grant_permission(subject, perm, *, valid_from=None, valid_until=None, store=None) -> Wallet
+async def revoke_permission(subject, perm, *, at=None, store=None) -> int
 effective_permissions(allowances: Iterable[Allowance]) -> dict[str, list[Allowance]]
 AllowancesBackend
 ```
@@ -155,7 +184,7 @@ currency starts with `PERMISSION_PREFIX` and whose `balance` is positive, and ma
 sorted. It reads nothing from the database; pass it the output of `effective_allowances`:
 
 ```python
-effective_permissions(effective_allowances(user))
+effective_permissions(await effective_allowances(user))
 # {"club.change_member": [Allowance(wallet=Wallet(id=7, ...), holder=SubjectRef("auth.group", "1"),
 #                                   depth=1, balance=Decimal("1.000000"))]}
 ```
@@ -171,8 +200,30 @@ and answers permission checks:
 | `has_perm(user_obj, perm, obj=None)` | `user_obj.is_active` and `perm` in `get_all_permissions(user_obj, obj)`. |
 | `has_module_perms(user_obj, app_label)` | Whether the user is active and holds any permission starting with `app_label + "."`. |
 
-`aget_all_permissions`, `ahas_perm`, `ahas_module_perms`, `aauthenticate` and `aget_user` are the async variants.
-`get_store()` returns the `DjangoStore` it reads; override it in a subclass to read another database.
+`has_perm`, `get_all_permissions` and `has_module_perms` run the synchronous API (`allowances.sync`) with the store
+from `get_sync_store()`, by default one from `settings.ALLOWANCES_SYNC_STORE`.
+
+`aget_all_permissions`, `ahas_perm`, `ahas_module_perms`, `aauthenticate` and `aget_user` are the asynchronous variants,
+under the names Django 5.2 and later calls from asynchronous code (`await user.ahas_perm(...)`). They run the
+asynchronous API with the store from `get_store()`, by default one from `settings.ALLOWANCES_STORE`. The synchronous and
+the asynchronous checks share the per-user cache.
+
+Override `get_store()` and `get_sync_store()` in a subclass to read another database or use another store; the store
+of `get_sync_store()` must never suspend.
+
+## Synchronous modules
+
+`allowances_django.sync.shortcuts` has every shortcut above as a plain function with the same signature, plus
+`get_store(store=None)` (`store`, or a new store from `settings.ALLOWANCES_SYNC_STORE`) and `get_provider`. Each call
+passes `store=`, or the store from `ALLOWANCES_SYNC_STORE`, to the coroutine and runs it with
+`allowances.sync.driver.run`; the store must never suspend.
+
+`allowances_django.sync.permissions` has `grant_permission` and `revoke_permission` as plain functions, run the same
+way, and re-exports `AllowancesBackend`, `PermissionProvider`, `effective_permissions`, `permission_feature`,
+`PERMISSION_PREFIX` and `PERMISSION_SOURCE`.
+
+`allowances_django.sync.store.DjangoStore` is described under [Stores](#stores). See [Synchronous
+API](/guide/synchronous#django).
 
 ## Models
 
@@ -207,7 +258,7 @@ A partial unique constraint on `storno_of` enforces that a transaction is revers
 The engine only reads modifiers; the application creates them:
 
 ```python
-LicenseModifier.objects.create(
+await LicenseModifier.objects.acreate(
     subject_type="auth.user", subject_id=str(user.pk),
     feature="send_email", factor=Decimal("0.5"),
     valid_until=end_of_promo,
@@ -229,7 +280,7 @@ archival. `TransactionArchive` keeps `actor_type` and `actor_id`.
 
 ### `AllowancesLock`
 
-`name` (primary key). A row that `DjangoStore` locks with `select_for_update()` to serialise one kind of change; the row
+`name` (primary key). A row that the stores lock with `select_for_update()` to serialise one kind of change; the row
 `"membership"` serialises membership changes. The store creates a missing row. It holds no data.
 
 ## Settings
@@ -245,10 +296,34 @@ The full shape is in [Concepts](/guide/concepts). Absent, `SettingsProvider` rea
 raises `DefinitionNotFoundError`.
 
 ```python
+ALLOWANCES_STORE = "allowances_django.store.DjangoStore"
+ALLOWANCES_SYNC_STORE = "allowances_django.sync.store.DjangoStore"
+```
+
+The default stores: `ALLOWANCES_STORE` of `allowances_django.shortcuts`, `allowances_django.permissions` and the
+asynchronous checks of `AllowancesBackend`; `ALLOWANCES_SYNC_STORE` of `allowances_django.sync.shortcuts`,
+`allowances_django.sync.permissions` and the synchronous checks. Each is a dotted path to a callable or a callable,
+called with no arguments for every call without `store=`. The values above are the defaults.
+
+```python
 ALLOWANCES_ADMIN_READ_ONLY = False
 ```
 
 `True` makes every allowances model view-only in the [admin](#admin).
+
+## adorm store
+
+`allowances_adorm.store`, with `pip install "allowances[adorm]"`; see [adorm backend](/backends/adorm).
+
+```python
+AdormStore(using: str | None = None, *, session_name: str = "default")
+```
+
+A [Store](/backends/) over adorm models generated from `allowances_django.models` (`allowances_adorm.models`). With
+`using` (an adorm profile name) every call runs on the adorm session `(using, session_name)`; without it, on
+`adorm.current_session()`, so the store joins the caller's `adorm.atomic()` block. `unit_of_work()` is
+`session.atomic()`. The methods suspend: the store serves only the asynchronous API. `session()` returns the session the
+next call runs on.
 
 ## Admin
 

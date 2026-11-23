@@ -58,7 +58,7 @@ from decimal import Decimal
 from allowances import WalletSpec, WalletType
 from allowances_django.shortcuts import open_wallet
 
-open_wallet(user, WalletSpec(WalletType.GRANT, "club_admin", Decimal("1")), source="role")
+await open_wallet(user, WalletSpec(WalletType.GRANT, "club_admin", Decimal("1")), source="role")
 ```
 
 A grant wallet with rate 0, balance 1 and no `valid_until` is a **permanent right**. Rate-0 wallets never take part in
@@ -69,11 +69,11 @@ the [overdraft](/guide/overdraft) pass, so `overdraft_limit` does not make a rig
 ```python
 from allowances_django.shortcuts import attach, fulfill, peek
 
-peek("edit_members", 1, {"user": user}).satisfied     # a check: nothing is written
+(await peek("edit_members", 1, {"user": user})).satisfied   # a check: nothing is written
 
-result = fulfill("edit_members", 1, {"user": user})    # a use: on the ledger
-member.save()
-attach(result.guid, member)
+result = await fulfill("edit_members", 1, {"user": user})  # a use: on the ledger
+await member.asave()
+await attach(result.guid, member)
 ```
 
 `peek` checks the right and writes nothing. `fulfill` records a use: a `consumption` entry of amount 0 under a
@@ -97,7 +97,7 @@ writes no ledger entry and leaves the balance as it is; `archive_expired_wallets
 ```python
 from allowances_django.shortcuts import close_wallet
 
-close_wallet(wallet)
+await close_wallet(wallet)
 ```
 
 ## Groups
@@ -108,10 +108,10 @@ and groups may be members of groups, to any depth.
 ```python
 from allowances_django.shortcuts import add_member, groups_of, remove_member
 
-add_member(user, board)
-add_member(board, club)
-groups_of(user)            # [board, club], nearest first
-remove_member(user, board) # True
+await add_member(user, board)
+await add_member(board, club)
+await groups_of(user)            # [board, club], nearest first
+await remove_member(user, board) # True
 ```
 
 `add_member` raises `MembershipCycleError` when the group is the member itself or already one of its members, directly
@@ -129,8 +129,8 @@ Every ledger entry records its **actor**, the subject on whose behalf it was mad
 argument; without it, the only subject when `subjects` holds exactly one, otherwise no actor:
 
 ```python
-fulfill("edit_members", 1, {"user": user})                       # actor: user
-fulfill("send_email", 1, {"user": user, "team": team}, actor=user)
+await fulfill("edit_members", 1, {"user": user})                       # actor: user
+await fulfill("send_email", 1, {"user": user, "team": team}, actor=user)
 ```
 
 The actor is the subject the caller passed, never the group it expanded to: when the club's wallet pays for a member's
@@ -150,19 +150,20 @@ subject passed, or of its groups, holds the permission.
 ```python
 from allowances_django.permissions import grant_permission, permission_feature, revoke_permission
 
-grant_permission(board, "club.change_member")
-grant_permission(user, "club.view_report", valid_until=end_of_audit)
-revoke_permission(board, "club.change_member")   # returns how many wallets it closed
+await grant_permission(board, "club.change_member")
+await grant_permission(user, "club.view_report", valid_until=end_of_audit)
+await revoke_permission(board, "club.change_member")   # returns how many wallets it closed
 ```
 
 `grant_permission` opens a grant wallet in currency `perm:<perm>` with balance 1 and source `"permission"`, which no
 `plan_switch` touches, from `valid_from` (default now) until `valid_until` (default: no end). `revoke_permission` closes
 every live grant wallet of that subject in that currency that has not ended yet.
+`allowances_django.sync.permissions` has both as synchronous functions.
 
 A use of a permission goes on the ledger like any other right:
 
 ```python
-result = fulfill(permission_feature("club.change_member"), 1, {"user": request.user})
+result = await fulfill(permission_feature("club.change_member"), 1, {"user": user})
 ```
 
 ### Configuring the backend
@@ -179,15 +180,21 @@ chained after `ModelBackend`, Django grants a permission that either backend gra
 perms.club.change_member %}`, `@permission_required`, `PermissionRequiredMixin`, `ModelAdmin.has_*_permission` and DRF's
 permission classes all read it through `has_perm`.
 
+The synchronous checks (`has_perm`, `get_all_permissions`, `has_module_perms`) run the
+[synchronous API](/guide/synchronous) with the store of `ALLOWANCES_SYNC_STORE`. Django 5.2 and later calls
+`ahas_perm`, `aget_all_permissions` and `ahas_module_perms` from asynchronous code (`await user.ahas_perm(...)`);
+these run the asynchronous API with the store of `ALLOWANCES_STORE`. The backend's `get_sync_store()` and
+`get_store()` return those stores; a subclass overrides them to use others.
+
 `get_all_permissions(user)` is the permissions held by grant wallets of the user and of every group in `groups_of(user)`
 that are valid now and have a positive balance: the keys of [`effective_permissions`](#effective-permissions) applied to
 the user's grant allowances. An active superuser has every `Permission`; an inactive or anonymous user has none.
 `has_perm` and `has_module_perms` answer from that set. The set is read once per user object and cached on it
 (`_allowances_perm_cache`), as `ModelBackend` caches its own: a grant or revocation is seen by the next request's user
-object.
+object. The synchronous and the asynchronous checks share that cache.
 
-To give the members of an `auth.Group` a permission, make the user a member with `add_member(user, group)` and grant the
-permission to the group. Django's own `user.groups` is a separate table and does not count.
+To give the members of an `auth.Group` a permission, make the user a member with `await add_member(user, group)` and
+grant the permission to the group. Django's own `user.groups` is a separate table and does not count.
 
 ## Effective permissions
 
@@ -199,7 +206,7 @@ groups', in the library's terms. `effective_permissions` is a filter over that l
 from allowances_django.permissions import effective_permissions
 from allowances_django.shortcuts import effective_allowances
 
-effective_permissions(effective_allowances(user))
+effective_permissions(await effective_allowances(user))
 # {
 #     "club.change_member": [
 #         Allowance(wallet=Wallet(id=12, ...), holder=SubjectRef("auth.user", "5"),
@@ -224,7 +231,7 @@ holds. `effective_permissions` reads nothing itself and applies no superuser or 
 `AllowancesBackend`. The rest of the list — budgets, credits, rights outside Django permissions — is left to the caller:
 
 ```python
-held = [a for a in effective_allowances(user) if a.balance > 0]
+held = [a for a in await effective_allowances(user) if a.balance > 0]
 ```
 
 ## Limits

@@ -2,6 +2,40 @@
 
 ## Upgrading to 0.4
 
+### The API is asynchronous
+
+Every engine function and every Django shortcut is a coroutine function with the same name and signature. Code on an
+event loop awaits the calls:
+
+```python
+from allowances_django.shortcuts import fulfill
+
+result = await fulfill("send_email", 1, {"user": user})
+```
+
+Synchronous code keeps its calls unchanged and changes only the imports:
+
+| 0.3 | 0.4, synchronous code |
+| --- | --- |
+| `from allowances import fulfill, SubjectRef` | `from allowances.sync import fulfill, SubjectRef` |
+| `from allowances.engine import fulfill` | `from allowances.sync import fulfill` |
+| `from allowances_django.shortcuts import fulfill` | `from allowances_django.sync.shortcuts import fulfill` |
+| `from allowances_django.permissions import grant_permission` | `from allowances_django.sync.permissions import grant_permission` |
+| `with store.unit_of_work():` | `with allowances.sync.unit_of_work(store):` |
+| `DjangoStore()` passed to the synchronous API | `allowances_django.sync.store.DjangoStore()` |
+
+`allowances.sync` re-exports the types, errors and definitions, so one import line serves. A `transaction.atomic()`
+block around synchronous shortcuts works as before. See [Synchronous API](/guide/synchronous).
+
+`allowances_django.store.DjangoStore` is now the store of the asynchronous API: it runs its queries on threads and
+raises `StoreSuspendedError` when called without an event loop. Synchronous code that constructed it, for example for
+`store=` or `using=`, uses `allowances_django.sync.store.DjangoStore` with the same arguments. Code that called its
+methods directly awaits them. `AllowancesBackend` subclasses that override `get_store()` for the synchronous checks
+override `get_sync_store()` as well.
+
+The settings `ALLOWANCES_STORE` and `ALLOWANCES_SYNC_STORE` choose the default stores; their defaults are the two
+Django stores. See [Choosing the stores](/backends/django#choosing-the-stores).
+
 ### Django: run the migration
 
 ```sh
@@ -24,6 +58,11 @@ together. Modifiers use the same interval. A custom backend's `find_wallets` and
 with `valid_until` after `at`, and its `find_expired_wallets` wallets with `valid_until` at or before `at`.
 
 ### Custom backends
+
+Every store method except `unit_of_work` is a coroutine function (`async def`), and `unit_of_work()` returns an
+asynchronous context manager. A store over a synchronous client keeps its method bodies and adds `async` to each `def`;
+its `unit_of_work` becomes an `asynccontextmanager`. Such a store never suspends and serves `allowances.sync` as well.
+See [Writing a backend](/backends/writing-a-backend#execution).
 
 The store port gains required methods:
 

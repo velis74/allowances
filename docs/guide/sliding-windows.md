@@ -73,10 +73,10 @@ from allowances.engine import effective_balance
 from allowances_django.store import DjangoStore
 
 store = DjangoStore()
-wallet = store.find_wallets(...)[0]
+wallet = (await store.find_wallets(...))[0]
 
-effective_balance(store, wallet)   # balance used by fulfillment
-wallet.balance                     # per-window allotment
+await effective_balance(store, wallet)   # balance used by fulfillment
+wallet.balance                           # per-window allotment
 ```
 
 For a wallet without a window the two are the same.

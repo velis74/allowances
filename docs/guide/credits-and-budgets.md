@@ -24,21 +24,25 @@ The customer buys a pack of 500 credits. It stays until spent, whatever plan the
 ```python
 from decimal import Decimal
 
-from django.db import transaction
-
 from allowances import WalletSpec, WalletType
-from allowances_django.shortcuts import credit, open_wallet
+from allowances_django.shortcuts import credit, get_store, open_wallet
 
 
-def credits_purchased(user, payment):
-    with transaction.atomic():
-        pack = open_wallet(
+async def credits_purchased(user, payment):
+    store = get_store()
+    async with store.unit_of_work():
+        pack = await open_wallet(
             user,
             WalletSpec(WalletType.CONSUMABLE, "credits", Decimal("0")),
             source="purchase",
+            store=store,
         )
-        credit(pack, payment.credits, obj=payment)
+        await credit(pack, payment.credits, obj=payment, store=store)
 ```
+
+The shortcuts inside `async with store.unit_of_work():` get the same store and run in its transaction. In
+synchronous code the block is `with transaction.atomic():` around the shortcuts of
+[`allowances_django.sync.shortcuts`](/guide/synchronous#django).
 
 Each purchase is its own wallet. That gives every pack its own expiry: pass `valid_until` in the spec for credits that
 expire (for example a year after purchase); omit it for credits that do not expire. Within a fulfilment step, each
@@ -90,7 +94,7 @@ WalletSpec(
 the start of each period. Under `top_up` a plan switch keeps the wallet, and with it the carried-over credits:
 
 ```python
-credit(plan_wallet, Decimal("1000"), obj=invoice)
+await credit(plan_wallet, Decimal("1000"), obj=invoice)
 ```
 
 ## Postpaid budget
@@ -108,14 +112,14 @@ from allowances_django.shortcuts import open_wallet, plan_switch
 
 MONTHLY = {"day_of_month": 1, "time": "00:00:00"}
 
-plan_switch({"user": user}, [
+await plan_switch({"user": user}, [
     WalletSpec(
         WalletType.CONSUMABLE, "requests", Decimal("300"),
         reset_config=MONTHLY, on_switch=SwitchPolicy.ADJUST,
     ),
 ])
 
-budget = open_wallet(
+budget = await open_wallet(
     user,
     WalletSpec(
         WalletType.CONSUMABLE, "requests", Decimal("2000"),
@@ -140,16 +144,16 @@ budget = open_wallet(
 `fulfill` spends the included 300 first and the budget after it. When both are exhausted it raises
 `InsufficientBalanceError`: the customer has reached the budget limit.
 
-**The customer changes the limit.** `adjust_wallet(budget, Decimal("5000"))`. On a windowed budget this sets the new
-monthly limit and keeps what was already used this month; a limit lowered below current usage refuses further requests
-until the next month. A limit of zero turns overage off.
+**The customer changes the limit.** `await adjust_wallet(budget, Decimal("5000"))`. On a windowed budget this sets the
+new monthly limit and keeps what was already used this month; a limit lowered below current usage refuses further
+requests until the next month. A limit of zero turns overage off.
 
 **Billing.** At the end of the period, the amount to charge is what was drawn from the budget wallet:
 
 ```python
 from allowances_django.shortcuts import consumed
 
-used = consumed(budget, period_start, period_end)
+used = await consumed(budget, period_start, period_end)
 invoice_line(user, quantity=used, unit_price=PRICE_PER_REQUEST)
 ```
 
@@ -168,26 +172,26 @@ is a wallet of its own, funded from the guide's:
 ```python
 from decimal import Decimal
 
-from django.db import transaction
-
 from allowances import WalletSpec, WalletType
-from allowances_django.shortcuts import open_wallet, transfer
+from allowances_django.shortcuts import get_store, open_wallet, transfer
 
 
-def hand_out(guide_budget, tourist, guide):
-    with transaction.atomic():
-        pocket = open_wallet(
+async def hand_out(guide_budget, tourist, guide):
+    store = get_store()
+    async with store.unit_of_work():
+        pocket = await open_wallet(
             tourist,
             WalletSpec(WalletType.CONSUMABLE, "eur", Decimal("0")),
             source="allowance",
+            store=store,
         )
-        transfer(guide_budget, pocket, Decimal("10"), actor=guide)
+        await transfer(guide_budget, pocket, Decimal("10"), actor=guide, store=store)
     return pocket
 ```
 
 Opening and funding run in one transaction: when the guide's budget holds less than 10 EUR, `transfer` raises
-`InsufficientBalanceError` and the empty wallet is rolled back with it. With the core engine the same block is `with
-store.unit_of_work():`, which nests the same way.
+`InsufficientBalanceError` and the empty wallet is rolled back with it. With the core engine the block is the same
+`async with store.unit_of_work():`, which nests the same way.
 
 `transfer` never draws on overdraft: the source must hold the amount. Both wallets must be in the same currency; their
 types may differ. The ledger shows a `transfer` entry of −10 on the budget and +10 on the tourist's wallet, both with
@@ -197,23 +201,20 @@ the guide as actor.
 direction:
 
 ```python
-from django.db import transaction
-
-from allowances.engine import effective_balance
-from allowances_django.shortcuts import close_wallet, transfer
-from allowances_django.store import DjangoStore
+from allowances import effective_balance
+from allowances_django.shortcuts import close_wallet, get_store, transfer
 
 
-def settle(pocket, guide_budget, guide):
-    store = DjangoStore()
-    current = store.get_wallet(pocket.id)
+async def settle(pocket, guide_budget, guide):
+    store = get_store()
+    current = await store.get_wallet(pocket.id)
     if current is None:          # spent out and archived
         return
-    with transaction.atomic():
-        left = effective_balance(store, current)
+    async with store.unit_of_work():
+        left = await effective_balance(store, current)
         if left > 0:
-            transfer(current, guide_budget, left, actor=guide)
-        close_wallet(current)
+            await transfer(current, guide_budget, left, actor=guide, store=store)
+        await close_wallet(current, store=store)
 ```
 
 A tourist spending in the meantime leaves the pocket holding less than `left`; `transfer` then raises

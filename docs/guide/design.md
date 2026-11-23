@@ -40,6 +40,11 @@ Each decision is recorded with its reasons in
   through the `Store` interface; Django is one backend
   ([21](https://github.com/velis74/allowances/blob/main/DECISIONS.md#21-one-distribution-with-an-optional-extra-not-two-distributions),
   [28](https://github.com/velis74/allowances/blob/main/DECISIONS.md#28-archival-is-a-store-responsibility-the-core-never-names-an-archive-type)).
+- **Async-first, with a driven synchronous API.** Engine functions and store methods are coroutines; `allowances.sync`
+  runs them to completion without an event loop on a store that never suspends
+  ([45](https://github.com/velis74/allowances/blob/main/DECISIONS.md#45-async-first-core-the-synchronous-api-drives-the-coroutines-instead-of-being-generated-code),
+  [46](https://github.com/velis74/allowances/blob/main/DECISIONS.md#46-the-asynchronous-django-store-runs-a-unit-of-work-on-one-thread-of-its-own),
+  [47](https://github.com/velis74/allowances/blob/main/DECISIONS.md#47-an-adorm-store-over-the-django-tables-with-committed-generated-models)).
 - **Definitions in configuration, state in the store.** Features and currencies are names read from a provider;
   wallets and transactions are rows
   ([2](https://github.com/velis74/allowances/blob/main/DECISIONS.md#2-walletcurrency-is-a-plain-charfield-not-a-fk-to-a-db-model)).

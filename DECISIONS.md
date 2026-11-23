@@ -989,3 +989,62 @@ exactly once, and from its `valid_from` on a wallet is either valid or expired.
 **Cost to revisit:** Low in code (the comparisons in `Wallet.is_valid_at`, both stores, `archive_expired_wallets` and
 `revoke_permission`); a
 change of meaning for any caller relying on the bound.
+
+## 45. Async-first core; the synchronous API drives the coroutines instead of being generated code
+
+**Dilemma:** The library is called from asynchronous code (ASGI views, FastAPI, adorm) and from synchronous code
+(Celery tasks, management commands, synchronous Django views). Two engines, a synchronous one generated from the
+asynchronous source (unasync), or a synchronous core wrapped with `sync_to_async`, all keep two code paths or put a
+thread hop around every call.
+
+**Decision:** Every engine function and every store method is a coroutine with a plain name; the engine awaits nothing
+but store methods (no sleeps, locks, tasks or `gather`). `allowances.sync` lists the same names as wrappers that run the
+coroutine to completion without an event loop: `send(None)` once, the result from `StopIteration`. A coroutine that
+suspends is closed and `StoreSuspendedError` is raised. A store whose methods have synchronous bodies (`MemoryStore`,
+`allowances_django.sync.store.DjangoStore`) never suspends and serves both APIs.
+
+**Reason:** One engine source, no build step and no generated module that can drift. Driving the coroutine on the
+calling thread adds no thread or event loop to synchronous callers, and the synchronous Django ORM keeps running where
+Django expects it. The engine's restriction to awaiting store methods is what makes the coroutine finish on its first
+step; a store that suspends is detected at the first suspension instead of deadlocking or blocking a loop.
+
+**Cost to revisit:** Medium. Every public function and the store port are coroutines; going back means a breaking change
+for every caller and backend.
+
+## 46. The asynchronous Django store runs a unit of work on one thread of its own
+
+**Dilemma:** Django has no asynchronous `transaction.atomic` or `select_for_update`, and a connection belongs to one
+thread. Django's asynchronous ORM methods (`aget`, ...) run each query through `sync_to_async` on one shared
+thread-sensitive thread, which serialises every unit of work of the process, and an atomic block opened there would be
+shared with whatever else runs on that thread.
+
+**Decision:** `allowances_django.store.DjangoStore` runs the same queries as the synchronous store
+(`DjangoQueries`). Outside a unit of work a call goes through `sync_to_async` like Django's own asynchronous ORM. The
+outermost `async with store.unit_of_work():` creates a single-thread executor held in a context variable; `atomic()` is
+entered and exited on it, every store call inside the block (any instance, nested blocks) runs there, and the thread's
+connections are closed when the block ends.
+
+**Reason:** A transaction needs one connection, and one connection needs one thread. A thread per unit of work gives
+concurrent units of work separate connections and transactions, and the context variable lets the engine's nested
+blocks and the shortcuts' fresh store instances join the caller's block without passing anything. One query
+implementation serves both Django stores. The cost is a connection per unit of work, kept cheap by a connection pool,
+and parallelism bounded by threads; asynchronous I/O is the adorm store's job.
+
+**Cost to revisit:** Low. The execution strategy is private to the store; the port and the queries are unchanged by it.
+
+## 47. An adorm store over the Django tables, with committed generated models
+
+**Dilemma:** Asynchronous I/O on PostgreSQL needs a driver that runs on the event loop, which the Django ORM does not
+have. A second schema or hand-written SQL would duplicate the Django models and migrations.
+
+**Decision:** `allowances_adorm.store.AdormStore` implements the port with adorm querysets over models that
+`adorm generate` produces from `allowances_django.models`, committed in `allowances_adorm/models/` and checked in CI
+with `adorm generate --check`. The tables and migrations stay `allowances_django`'s. The store runs on a given adorm
+session or on the current one, so it joins an `adorm.atomic()` block of the caller; it works on adorm's Django driver
+and on its native asyncpg driver. Timestamps are written by the store.
+
+**Reason:** One schema, owned by Django migrations; the generated models cannot drift from it unnoticed. Running on the
+current session makes the store part of the application's adorm transactions. Writing timestamps explicitly keeps the
+store independent of Django defaults, which the native driver does not run.
+
+**Cost to revisit:** Low. A separate package and extra; the core and the Django stores do not depend on it.

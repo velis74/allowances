@@ -23,7 +23,7 @@ The core receives only a `SubjectRef`, a `(type, id)` pair, not application obje
 instances:
 
 ```python
-fulfill("send_email", 1, {"user": request.user, "team": team})
+await fulfill("send_email", 1, {"user": user, "team": team})
 ```
 
 The keys (`"user"`, `"team"`) are chosen by the application, and `fulfillment_order` refers to them. The same object
@@ -123,10 +123,10 @@ to one, and passing the same `guid` to several calls groups them:
 
 ```python
 guid = uuid.uuid4()
-fulfill("send_email", 1, subjects, guid=guid)
-fulfill("attach_file", 3, subjects, guid=guid)
+await fulfill("send_email", 1, subjects, guid=guid)
+await fulfill("attach_file", 3, subjects, guid=guid)
 
-unfulfill(guid)  # both, as a unit
+await unfulfill(guid)  # both, as a unit
 ```
 
 `unfulfill(guid)` reverses every transaction of the record. A `transfer` writes both of its legs under one record, so
@@ -140,9 +140,9 @@ special type; a subject may belong to any number of groups, and groups may be me
 ```python
 from allowances_django.shortcuts import add_member, groups_of
 
-add_member(user, team)
-add_member(team, organisation)
-groups_of(user)   # [team, organisation]
+await add_member(user, team)
+await add_member(team, organisation)
+await groups_of(user)   # [team, organisation]
 ```
 
 `peek` and `fulfill` expand every passed subject with its groups, under the same key: `{"user": user}` also draws on
@@ -160,7 +160,7 @@ subject and of its groups, of any currency and wallet type, with its effective b
 ```python
 from allowances_django.shortcuts import effective_allowances
 
-for allowance in effective_allowances(user):
+for allowance in await effective_allowances(user):
     print(allowance.holder, allowance.depth, allowance.wallet.wallet_type,
           allowance.wallet.currency, allowance.balance)
 
@@ -185,7 +185,7 @@ A time-limited, subject-scoped factor that changes what a feature costs: a disco
 Where several apply, the smallest factor is used: the lowest cost, the most favourable to the subject.
 
 ```python
-LicenseModifier.objects.create(
+await LicenseModifier.objects.acreate(
     subject_type="auth.user", subject_id=str(user.pk),
     feature="send_email", factor=Decimal("0.5"),
     valid_until=end_of_promo,

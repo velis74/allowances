@@ -1,8 +1,8 @@
 # allowances
 
-Grants and consumable budgets, checked before an operation and recorded in an append-only ledger. Storage-agnostic,
-with a Django backend that also serves Django permissions: expiring, inherited through nested groups, held by any model,
-with each use recordable on the ledger.
+Grants and consumable budgets, checked before an operation and recorded in an append-only ledger. Async-first and
+storage-agnostic, with a Django backend that also serves Django permissions: expiring, inherited through nested groups,
+held by any model, with each use recordable on the ledger.
 
 📖 **Documentation:** [docs.velis.si/allowances](https://docs.velis.si/allowances). The source is in `docs/`;
 `npm install && npm run docs:dev` serves it locally.
@@ -34,7 +34,8 @@ order, conversion, rounding, overdraft and sliding windows, and accesses storage
 
 ```bash
 pip install allowances            # the engine, zero dependencies
-pip install "allowances[django]"  # ...and the Django models, store and admin
+pip install "allowances[django]"  # ...and the Django models, stores and admin
+pip install "allowances[adorm]"   # ...and the adorm store (add "adorm[asyncpg]" for asynchronous I/O on PostgreSQL)
 ```
 
 The Django backend is enabled in `INSTALLED_APPS`; the examples below use it:
@@ -70,14 +71,17 @@ from allowances import InsufficientBalanceError
 from allowances_django.shortcuts import fulfill, attach, unfulfill
 
 try:
-    result = fulfill("send_email", 1, {"user": request.user, "team": team})
+    result = await fulfill("send_email", 1, {"user": user, "team": team})
 except InsufficientBalanceError as exc:
     return http_402(f"Only {exc.result.granted} left")
 
 message = send_the_email()
-attach(result.guid, message)   # link the ledger entries to the sent message
-# ...or unfulfill(result.guid) if it failed
+await attach(result.guid, message)   # link the ledger entries to the sent message
+# ...or await unfulfill(result.guid) if it failed
 ```
+
+Synchronous code imports the same functions from `allowances_django.sync.shortcuts` (or `allowances.sync`) and calls
+them without `await`; see [Synchronous API](https://docs.velis.si/allowances/guide/synchronous).
 
 ## Architecture
 
@@ -86,7 +90,8 @@ priority order; it is configuration. **State**: what a subject holds and has con
 ledger.
 
 The engine reads definitions through a `DefinitionProvider` and state through a 22-method store port; it runs unchanged
-on Postgres, SQLite or `MemoryStore`.
+on Postgres, SQLite or `MemoryStore`. Engine functions and store methods are coroutines; `allowances.sync` runs them
+without an event loop on a store that never suspends.
 
 ```text
    allowances.engine        peek · fulfill · unfulfill · transfer · add_member · plan_switch
@@ -97,7 +102,8 @@ Store port   DefinitionProvider
    │                │
    ▼                ▼
 DjangoStore    SettingsProvider
-MemoryStore    DictProvider
+AdormStore     DictProvider
+MemoryStore
 ```
 
 Highlights:
@@ -148,14 +154,14 @@ from django.utils import timezone
 from allowances_django.permissions import effective_permissions, grant_permission
 from allowances_django.shortcuts import add_member, effective_allowances
 
-user = User.objects.get(username="ana")
-editors = Group.objects.create(name="editors")
-add_member(user, editors)
-grant_permission(editors, "club.change_member", valid_until=timezone.now() + timedelta(days=90))
+user = await User.objects.aget(username="ana")
+editors = await Group.objects.acreate(name="editors")
+await add_member(user, editors)
+await grant_permission(editors, "club.change_member", valid_until=timezone.now() + timedelta(days=90))
 
-user.has_perm("club.change_member")   # True (on a freshly loaded user)
+await user.ahas_perm("club.change_member")   # True (on a freshly loaded user)
 
-effective_permissions(effective_allowances(user))
+effective_permissions(await effective_allowances(user))
 # {"club.change_member": [Allowance(wallet=Wallet(...), holder=SubjectRef("auth.group", "1"),
 #                                   depth=1, balance=Decimal("1.000000"))]}
 ```
@@ -171,7 +177,7 @@ objects; `effective_permissions` keeps the Django permissions. The backend works
 
 ```bash
 uv sync
-uv run pytest                          # both stores, no setup
+uv run pytest                          # every store, no setup
 uv run ruff check . && uv run ruff format --check .
 
 npm install
@@ -180,7 +186,9 @@ npm run docs:dev
 
 The suite uses a file-backed SQLite database by default. `tests/env.py` (copied from `tests/env.example.py`) selects a
 local Postgres; `ALLOWANCES_TEST_DB=sqlite` forces SQLite. Both databases are supported.
-`tests/django/test_concurrency.py` runs eight threads against one wallet and asserts it is granted exactly once.
+The engine tests run once per store: in-memory, both Django stores, and the adorm store on adorm's Django driver and,
+on Postgres, on its asyncpg driver. `tests/django/test_concurrency.py` runs eight concurrent callers against one wallet
+and asserts it is granted exactly once.
 
 Supported: Django 5.2 to 6.x (`Django>=5.2,<7`). Local runs use the installed Django. CI tests Django 5.2 on Python
 3.11, 6.0 on 3.12 and 6.1 on 3.13 on Postgres, and 5.2 on 3.11 and 6.1 on 3.13 on SQLite.
