@@ -24,6 +24,6 @@
     "eslint-config-velis": "^2.0.12",
     "markdownlint-cli2": "^0.18.1",
     "typescript": "^5",
-    "vitepress": "^1.6.3"
+    "vitepress": "2.0.0-alpha.21"
   }
 }
