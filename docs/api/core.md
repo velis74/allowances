@@ -208,6 +208,22 @@ Records holding a `CONSUMPTION` transaction without an attached object; the oper
 Credit and transfer entries never make a record match. `older_than` limits the result to records created at or before
 that instant, which excludes operations still in progress.
 
+### `transactions_for_object`
+
+```python
+async def transactions_for_object(store, obj) -> list[Transaction]
+```
+
+The ledger entries of one domain object (`ObjectRef`), oldest first: every live entry attached to it by `attach`,
+`credit(obj=)` or `transfer(obj=)`, and every storno that reverses one of them. Stornos carry no object of their own;
+they are found through `storno_of_id` within the entries' fulfilment records. The sum of `amount` over the result is the
+object's net effect on the ledger: consumption is negative, its storno gives it back. See [Entries of an
+object](/guide/reversals#entries-of-an-object).
+
+A storno that reverses an entry of another object is left out. Entries of archived wallets are not returned. An unknown
+object gives `[]`. Raises `UnsupportedOperationError` when the store does not implement the optional
+`transactions_for_object` (see [Store](#store)).
+
 ### `add_member`
 
 ```python
@@ -408,6 +424,11 @@ wallet ids, and [Writing a backend](/backends/writing-a-backend) for the full me
 `unit_of_work` is a coroutine function; `unit_of_work()` returns an asynchronous context manager
 (`async with store.unit_of_work():`). A store whose methods never suspend also serves `allowances.sync`.
 
+`transactions_for_object(*, obj)` is an optional store method, not a member of the protocol, so
+`isinstance(store, Store)` does not depend on it. Without it, the engine function
+[`transactions_for_object`](#transactions-for-object) raises `UnsupportedOperationError`; every other function works.
+All stores shipped with the library implement it.
+
 ## `allowances.sync`
 
 The synchronous API; see [Synchronous API](/guide/synchronous).
@@ -416,8 +437,8 @@ Every engine function above, with the same name, signature and docstring, as a p
 coroutine returns: `add_member`, `adjust_wallet`, `archive_expired_wallets`, `attach`, `cancel_scheduled_switch`,
 `close_wallet`, `consumed`, `credit`, `effective_allowances`, `effective_balance`,
 `find_unattached_fulfillment_records`, `fulfill`, `groups_of`, `open_wallet`, `peek`, `plan_switch`, `remove_member`,
-`transfer`, `unfulfill`. The types, definitions, errors, `Store` and `window_start` are re-exported, the same objects as
-in `allowances`.
+`transactions_for_object`, `transfer`, `unfulfill`. The types, definitions, errors, `Store` and `window_start` are
+re-exported, the same objects as in `allowances`.
 
 The store passed must never suspend; a call that suspends raises `StoreSuspendedError`.
 

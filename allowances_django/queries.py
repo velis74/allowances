@@ -374,6 +374,15 @@ class DjangoQueries:
             qs = _locked(qs)
         return [to_transaction(row, record_guid=record_guid) for row in qs]
 
+    def transactions_for_object(self, *, obj: ObjectRef) -> list[CoreTransaction]:
+        qs = (
+            self._qs(Transaction)
+            .filter(object_type=obj.type, object_id=obj.id)
+            .select_related("record")
+            .order_by("created_at", "id")
+        )
+        return [to_transaction(row) for row in qs]
+
     def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         self._qs(Transaction).filter(pk__in=list(transaction_ids)).update(object_type=obj.type, object_id=obj.id)
 

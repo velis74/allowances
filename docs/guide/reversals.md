@@ -73,6 +73,24 @@ the window has passed, the original consumption no longer counts, so the storno 
 window and raises its balance above the allotment. Reverse within the window to avoid it.
 :::
 
+## Entries of an object
+
+`transactions_for_object` returns the ledger entries of one domain object, oldest first: the entries attached to it
+(by `attach`, `credit(obj=)` or `transfer(obj=)`) and the stornos that reverse them. The sum of their amounts is what
+the object cost, net of reversals:
+
+```python
+entries = await transactions_for_object(store, ObjectRef("mail.message", message.pk))
+for entry in entries:
+    print(entry.created_at, entry.kind, entry.amount, entry.actor)
+net = sum((entry.amount for entry in entries), Decimal("0"))   # -3 after the use, 0 after its reversal
+```
+
+The Django shortcut takes the model instance: `await transactions_for_object(message)`.
+
+Stornos are found through the entries they reverse, so a reversal shows up under the object even though `attach` ran
+before it. Entries of [archived](/guide/plans-and-archival) wallets are no longer in live storage and are not returned.
+
 ## Recovery sweep
 
 A consumption entry with no attached object is a fulfilment whose business operation may have failed. Credits and

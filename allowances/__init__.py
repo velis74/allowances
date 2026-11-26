@@ -39,6 +39,7 @@ from allowances.engine import (
     peek,
     plan_switch,
     remove_member,
+    transactions_for_object,
     transfer,
     unfulfill,
 )
@@ -71,7 +72,7 @@ from allowances.types import (
 )
 from allowances.windows import window_start
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     "Allowance",
@@ -120,6 +121,7 @@ __all__ = [
     "peek",
     "plan_switch",
     "remove_member",
+    "transactions_for_object",
     "transfer",
     "unfulfill",
     "window_start",

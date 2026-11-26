@@ -209,6 +209,7 @@ class DjangoStore:
     transactions_for_wallet = _on_thread(DjangoQueries.transactions_for_wallet)
     create_transaction = _on_thread(DjangoQueries.create_transaction)
     transactions_for_record = _on_thread(DjangoQueries.transactions_for_record)
+    transactions_for_object = _on_thread(DjangoQueries.transactions_for_object)
     attach_object = _on_thread(DjangoQueries.attach_object)
     get_or_create_record = _on_thread(DjangoQueries.get_or_create_record)
     get_record = _on_thread(DjangoQueries.get_record)

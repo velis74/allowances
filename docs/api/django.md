@@ -19,7 +19,7 @@ the same functions as plain functions.
 from allowances_django.shortcuts import (
     peek, fulfill, attach, unfulfill, plan_switch, cancel_scheduled_switch,
     open_wallet, credit, transfer, adjust_wallet, close_wallet, consumed,
-    archive_expired_wallets, find_unattached_fulfillment_records,
+    archive_expired_wallets, find_unattached_fulfillment_records, transactions_for_object,
     add_member, remove_member, groups_of, effective_allowances,
 )
 ```
@@ -42,6 +42,7 @@ async def close_wallet(wallet, *, at=None, store=None)
 async def consumed(wallet, since, until, *, store=None)
 async def archive_expired_wallets(at=None, *, store=None)
 async def find_unattached_fulfillment_records(older_than=None, *, store=None)
+async def transactions_for_object(obj, *, store=None) -> list[Transaction]
 async def add_member(member, group, *, store=None)
 async def remove_member(member, group, *, store=None) -> bool
 async def groups_of(obj, *, store=None) -> list
@@ -57,6 +58,9 @@ is `PermissionProvider(SettingsProvider())`: `settings.ALLOWANCES` plus the [`pe
 
 `groups_of` returns the groups as model instances, nearest first; a group whose reference resolves to no existing
 object is left out.
+
+`transactions_for_object` is [`allowances.transactions_for_object`](/api/core#transactions-for-object) with the store
+supplied; `obj` is a model instance or an `ObjectRef`, converted as by `attach`.
 
 `effective_allowances` is [`allowances.effective_allowances`](/api/core#effective-allowances) with the store supplied:
 every live wallet of `subject` (a model instance or a `SubjectRef`) and of its groups, as `Allowance` values whose

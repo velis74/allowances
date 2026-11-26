@@ -100,6 +100,14 @@ async def attach(guid: uuid.UUID, obj, *, store: Store | None = None) -> None:
     await engine.attach(get_store(store), guid, object_ref(obj))
 
 
+async def transactions_for_object(obj, *, store: Store | None = None) -> list[Transaction]:
+    """
+    The ledger entries of ``obj`` (a model instance or ``ObjectRef``), oldest first: the entries attached to it
+    and the stornos that reverse them; see :func:`allowances.engine.transactions_for_object`.
+    """
+    return await engine.transactions_for_object(get_store(store), object_ref(obj))
+
+
 async def unfulfill(guid: uuid.UUID, *, at: datetime | None = None, actor=None, store: Store | None = None) -> None:
     """
     Reverse everything recorded under ``guid``, as storno entries carrying ``actor`` (a model

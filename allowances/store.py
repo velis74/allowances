@@ -30,6 +30,15 @@ the engine's coroutines without an event loop. A store that suspends works only 
 
 A backend raises :class:`allowances.errors.UnsupportedOperationError` for an operation it does not
 support.
+
+**Optional methods.** A store may also implement the methods below. They are not members of the
+:class:`Store` protocol, so ``isinstance(store, Store)`` does not depend on them. The engine looks each one
+up on the store; the function that needs a missing one raises
+:class:`~allowances.errors.UnsupportedOperationError`, every other function works.
+
+``async def transactions_for_object(self, *, obj: ObjectRef) -> list[Transaction]``
+    Every live transaction whose ``obj`` equals ``obj``, ordered by ``(created_at, id)``. Used by
+    :func:`allowances.engine.transactions_for_object`.
 """
 
 from __future__ import annotations

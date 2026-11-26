@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1 — 2026-11-26
+
+### Added
+
+- `transactions_for_object(store, obj)` (also in `allowances.sync`): the ledger entries of one domain object, oldest
+  first — every live entry attached to it by `attach`, `credit(obj=)` or `transfer(obj=)`, and the stornos that reverse
+  them. Summing their `amount` gives the object's net effect on the ledger.
+- Django: shortcut `transactions_for_object(obj)` in `allowances_django.shortcuts` and
+  `allowances_django.sync.shortcuts`.
+- Store port: optional method `transactions_for_object(*, obj)`, not a member of the `Store` protocol. `MemoryStore`,
+  both Django stores and `AdormStore` implement it; with a store that lacks it, `transactions_for_object` raises
+  `UnsupportedOperationError`.
+
 ## 0.5.0 — 2026-11-26
 
 Upgrade steps: [Upgrading to 0.5](https://docs.velis.si/allowances/guide/upgrading#upgrading-to-0-5).

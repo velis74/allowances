@@ -1,7 +1,8 @@
 # Writing a backend
 
-A store implements twenty-two methods. The [Django](/backends/django), [adorm](/backends/adorm) and
-[in-memory](/backends/memory) backends are complete implementations; `allowances/backends/memory.py` is the shortest.
+A store implements twenty-two methods, plus [optional ones](#optional-methods). The [Django](/backends/django),
+[adorm](/backends/adorm) and [in-memory](/backends/memory) backends are complete implementations;
+`allowances/backends/memory.py` is the shortest.
 
 ## Methods
 
@@ -50,6 +51,18 @@ A store inherits no base class. `allowances.store.Store` is a `Protocol`: a clas
 store. It is `runtime_checkable`, so `isinstance(obj, Store)` works.
 
 Methods take and return the frozen dataclasses of `allowances.types`, never storage rows.
+
+## Optional methods
+
+```python
+    async def transactions_for_object(self, *, obj) -> list[Transaction]: ...
+```
+
+Every live transaction whose `obj` equals `obj`, ordered by `(created_at, id)`; answer it with an indexed query on the
+object columns. It is not a member of the `Store` protocol, so a store without it still passes `isinstance(obj, Store)`
+and serves every engine function except [`transactions_for_object`](/api/core#transactions-for-object), which raises
+`UnsupportedOperationError`. The engine adds the stornos of the returned entries itself, through
+`transactions_for_record`.
 
 ## Execution
 

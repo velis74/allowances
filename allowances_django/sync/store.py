@@ -62,6 +62,7 @@ class DjangoStore:
     transactions_for_wallet = _immediate(DjangoQueries.transactions_for_wallet)
     create_transaction = _immediate(DjangoQueries.create_transaction)
     transactions_for_record = _immediate(DjangoQueries.transactions_for_record)
+    transactions_for_object = _immediate(DjangoQueries.transactions_for_object)
     attach_object = _immediate(DjangoQueries.attach_object)
     get_or_create_record = _immediate(DjangoQueries.get_or_create_record)
     get_record = _immediate(DjangoQueries.get_record)
