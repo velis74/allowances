@@ -70,6 +70,7 @@ async def fulfill(
     guid: uuid.UUID | None = None,
     allow_partial: bool = False,
     actor=None,
+    metadata: dict | None = None,
     provider: DefinitionProvider | None = None,
     at: datetime | None = None,
     store: Store | None = None,
@@ -78,7 +79,7 @@ async def fulfill(
     Consume the licence. Raises :class:`allowances.errors.InsufficientBalanceError` and rolls back
     if the request cannot be met in full, unless ``allow_partial=True``. ``actor`` (a model instance)
     is recorded on the entries; without it, the actor is the subject when ``subjects`` has a single
-    entry, otherwise none.
+    entry, otherwise none. ``metadata`` (JSON-serialisable) is recorded on every consumption entry.
     """
     return await engine.fulfill(
         get_store(store),
@@ -90,6 +91,7 @@ async def fulfill(
         allow_partial=allow_partial,
         at=at,
         actor=_actor(actor),
+        metadata=metadata,
     )
 
 
@@ -101,7 +103,7 @@ async def attach(guid: uuid.UUID, obj, *, store: Store | None = None) -> None:
 async def unfulfill(guid: uuid.UUID, *, at: datetime | None = None, actor=None, store: Store | None = None) -> None:
     """
     Reverse everything recorded under ``guid``, as storno entries carrying ``actor`` (a model
-    instance). Safe to call twice.
+    instance) and the metadata of the entries they reverse. Safe to call twice.
     """
     await engine.unfulfill(get_store(store), guid, at, actor=_actor(actor))
 
@@ -113,13 +115,14 @@ async def credit(
     guid: uuid.UUID | None = None,
     obj=None,
     actor=None,
+    metadata: dict | None = None,
     at: datetime | None = None,
     store: Store | None = None,
 ) -> Transaction:
     """
     Add ``amount`` to a wallet as a ``GRANT`` ledger entry. ``wallet`` is a wallet, a wallet row or
     its id; ``obj`` is the model instance that paid for it, ``actor`` the model instance on whose
-    behalf it was made.
+    behalf it was made; ``metadata`` (JSON-serialisable) is recorded on the entry.
     """
     return await engine.credit(
         get_store(store),
@@ -129,6 +132,7 @@ async def credit(
         obj=None if obj is None else object_ref(obj),
         at=at,
         actor=_actor(actor),
+        metadata=metadata,
     )
 
 
@@ -140,14 +144,15 @@ async def transfer(
     guid: uuid.UUID | None = None,
     obj=None,
     actor=None,
+    metadata: dict | None = None,
     at: datetime | None = None,
     store: Store | None = None,
 ) -> FulfillmentResult:
     """
     Move ``amount`` from one wallet to another of the same currency, as a ``TRANSFER`` debit and
     credit under one fulfilment record. Wallets are wallets, wallet rows or ids; ``obj`` and
-    ``actor`` are model instances. Raises :class:`allowances.errors.InsufficientBalanceError` when
-    the source does not hold ``amount``.
+    ``actor`` are model instances; ``metadata`` (JSON-serialisable) is recorded on both entries.
+    Raises :class:`allowances.errors.InsufficientBalanceError` when the source does not hold ``amount``.
     """
     return await engine.transfer(
         get_store(store),
@@ -157,6 +162,7 @@ async def transfer(
         guid=guid,
         obj=None if obj is None else object_ref(obj),
         actor=_actor(actor),
+        metadata=metadata,
         at=at,
     )
 
