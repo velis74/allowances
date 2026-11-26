@@ -71,7 +71,7 @@ from allowances.types import (
 )
 from allowances.windows import window_start
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "Allowance",
