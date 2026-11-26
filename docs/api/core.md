@@ -25,7 +25,8 @@ expanded subject makes the answer satisfied.
 
 ```python
 async def fulfill(store, feature, quantity, subjects, provider,
-                  guid=None, allow_partial=False, at=None, *, actor=None) -> FulfillmentResult
+                  guid=None, allow_partial=False, at=None, *, actor=None,
+                  metadata: dict | None = None) -> FulfillmentResult
 ```
 
 Consume the licence, writing one transaction per wallet drawn from. A wallet whose effective rate is 0 and whose balance
@@ -40,6 +41,7 @@ is positive covers the rest of the request; its use is a `CONSUMPTION` entry of 
 | `allow_partial` | Keep whatever was available instead of raising. |
 | `at` | Treat this instant as "now" — validity windows, sliding windows, timestamps. |
 | `actor` | `SubjectRef` recorded on every entry. `None` records the only subject of `subjects` when it holds exactly one, otherwise no actor. The actor is the caller's subject, never a group it was expanded to. |
+| `metadata` | The application's data recorded on every consumption entry of this call, e.g. `{"reason": "newsletter", "ticket": 123}`. Stored as given, JSON-serialisable; the library does not read it. |
 
 Every candidate wallet is locked in one `lock_wallets` call before balances are read; an existing record named by `guid`
 is locked first. See [Lock order](#lock-order).
@@ -63,7 +65,8 @@ async def unfulfill(store, guid, at=None, *, actor=None) -> None
 ```
 
 Reverse everything under `guid` — consumption, credits and transfers — by writing matching storno entries, each recorded
-with `actor` (who reversed it). Nothing is deleted or edited. A storno of a zero entry is zero.
+with `actor` (who reversed it) and a copy of the reversed entry's `metadata`. Nothing is deleted or edited. A storno of
+a zero entry is zero.
 
 Idempotent — an already-reversed transaction is skipped. Transactions whose wallet has since been archived are skipped
 too. An unknown guid raises `RecordNotFoundError`.
@@ -117,12 +120,13 @@ as the wallet's `allotment`.
 
 ```python
 async def credit(store, wallet_id, amount, *, guid=None, obj: ObjectRef | None = None,
-                 actor: SubjectRef | None = None, at=None) -> Transaction
+                 actor: SubjectRef | None = None, at=None,
+                 metadata: dict | None = None) -> Transaction
 ```
 
-Add a positive `amount` to a wallet's balance, as a `GRANT` transaction recorded with `actor`. `obj` attaches it to
-whatever paid for it. `guid` files it under a fulfilment record so `unfulfill(guid)` reverses it; an existing record is
-locked before the wallet.
+Add a positive `amount` to a wallet's balance, as a `GRANT` transaction recorded with `actor` and `metadata`. `obj`
+attaches it to whatever paid for it. `guid` files it under a fulfilment record so `unfulfill(guid)` reverses it; an
+existing record is locked before the wallet.
 
 Raises `WalletNotFoundError` for an unknown or archived wallet, `UnsuitableWalletError` for a windowed wallet or one not
 valid at `at`, `ValueError` for an amount that is not positive.
@@ -132,13 +136,14 @@ valid at `at`, `ValueError` for an amount that is not positive.
 ```python
 async def transfer(store, from_wallet_id, to_wallet_id, amount, *, guid=None,
                    obj: ObjectRef | None = None, actor: SubjectRef | None = None,
-                   at=None) -> FulfillmentResult
+                   at=None, metadata: dict | None = None) -> FulfillmentResult
 ```
 
 Move a positive `amount` from one wallet to another of the same currency. Writes two `TRANSFER` transactions under one
 fulfilment record (`guid`, or a new one): a debit of `-amount` on the source and a credit of `amount` on the target,
-both recorded with `actor` and attached to `obj` when given. The wallet types may differ. A windowed wallet's stored
-allotment is not changed; the entries count in its window like any other. A source drained to zero is not archived.
+both recorded with `actor` and `metadata` and attached to `obj` when given. The wallet types may differ. A windowed
+wallet's stored allotment is not changed; the entries count in its window like any other. A source drained to zero is
+not archived.
 
 The source must hold the amount — `max(effective_balance, 0) >= amount`; overdraft is never used. Both wallets are
 locked in one `lock_wallets` call; an existing record named by `guid` is locked first.
@@ -302,11 +307,16 @@ written by the engine).
 
 ### `Transaction`
 
-`id`, `wallet_id`, `kind`, `amount` (signed), `created_at`, `record_guid`, `feature`, `storno_of_id`, `obj`, `actor`.
+`id`, `wallet_id`, `kind`, `amount` (signed), `created_at`, `record_guid`, `feature`, `storno_of_id`, `obj`, `actor`,
+`metadata`.
 
 `amount` is negative for consumption and for the debit leg of a transfer, positive for a grant and for the credit leg of
 a transfer, zero for the use of a right; a storno carries the negated amount of the entry it reverses. `actor` is the
-`SubjectRef` on whose behalf the entry was made, or `None`.
+`SubjectRef` on whose behalf the entry was made, or `None`. `metadata` is the application's `dict` given to `fulfill`,
+`credit` or `transfer`, or `None`; a storno carries a copy of the reversed entry's, and plan adjustments carry none. The
+library neither prescribes nor reads its keys and does not validate it. It must be JSON-serialisable: the Django and
+adorm stores keep it in a JSON column. `MemoryStore` keeps a deep copy, so changing the caller's `dict` afterwards does
+not change the entry.
 
 ### `WalletSpec`
 

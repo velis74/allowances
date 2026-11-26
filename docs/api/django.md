@@ -27,15 +27,16 @@ from allowances_django.shortcuts import (
 ```python
 async def peek(feature, quantity, subjects, *, provider=None, at=None, store=None)
 async def fulfill(feature, quantity, subjects, *, guid=None, allow_partial=False,
-                  actor=None, provider=None, at=None, store=None)
+                  actor=None, metadata=None, provider=None, at=None, store=None)
 async def attach(guid, obj, *, store=None)
 async def unfulfill(guid, *, at=None, actor=None, store=None)
 async def plan_switch(subjects, open_wallets, effective_date=None, *, store=None)
 async def cancel_scheduled_switch(subjects, *, store=None)
 async def open_wallet(subject, spec, *, source, effective_date=None, store=None)
-async def credit(wallet, amount, *, guid=None, obj=None, actor=None, at=None, store=None)
+async def credit(wallet, amount, *, guid=None, obj=None, actor=None, metadata=None, at=None,
+                 store=None)
 async def transfer(from_wallet, to_wallet, amount, *, guid=None, obj=None, actor=None,
-                   at=None, store=None)
+                   metadata=None, at=None, store=None)
 async def adjust_wallet(wallet, allotment, *, at=None, store=None)
 async def close_wallet(wallet, *, at=None, store=None)
 async def consumed(wallet, since, until, *, store=None)
@@ -241,9 +242,11 @@ Amounts are `DecimalField(max_digits=20, decimal_places=6)`.
 ### `Transaction`
 
 `wallet` (FK, cascade), `record` (FK, null), `kind`, `amount`, `feature`, `storno_of` (self FK, protected),
-`object_type`, `object_id`, `actor_type`, `actor_id`, `created_at`.
+`object_type`, `object_id`, `actor_type`, `actor_id`, `metadata`, `created_at`.
 
 `actor_type` / `actor_id` name the subject on whose behalf the entry was made; both are empty when it has none.
+`metadata` (`JSONField`, null) holds the application's data given to `fulfill`, `credit` or `transfer`, copied onto
+stornos; `NULL` when there is none.
 
 A partial unique constraint on `storno_of` enforces that a transaction is reversed at most once.
 
@@ -276,7 +279,7 @@ memberships with `add_member` and `remove_member`, which reject cycles.
 
 Spent-out and expired wallets and their transactions. Archival deletes the live wallet, so there is no foreign key to
 it; `original_wallet_id` is a plain reference. `TransactionArchive.storno_of` points at archived copies, rebuilt during
-archival. `TransactionArchive` keeps `actor_type` and `actor_id`.
+archival. `TransactionArchive` keeps `actor_type`, `actor_id` and `metadata`.
 
 ### `AllowancesLock`
 

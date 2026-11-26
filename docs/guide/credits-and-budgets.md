@@ -6,8 +6,8 @@ after use, and transfers between wallets. All three use these functions:
 | | |
 | --- | --- |
 | `open_wallet(subject, spec, source=...)` | Opens one wallet outside a plan switch. Any `source` other than `"plan"` keeps it out of every `plan_switch`. |
-| `credit(wallet, amount, obj=..., guid=...)` | Adds to a wallet's balance as a `grant` ledger entry, attached to whatever paid for it. |
-| `transfer(from_wallet, to_wallet, amount)` | Moves an amount between two wallets of the same currency, as a pair of `transfer` ledger entries. |
+| `credit(wallet, amount, obj=..., guid=..., metadata=...)` | Adds to a wallet's balance as a `grant` ledger entry, attached to whatever paid for it. |
+| `transfer(from_wallet, to_wallet, amount, metadata=...)` | Moves an amount between two wallets of the same currency, as a pair of `transfer` ledger entries. |
 | `close_wallet(wallet)` | Ends a wallet now, without a ledger entry. |
 | `adjust_wallet(wallet, allotment)` | Changes the allotment of a wallet opened with an `adjust` or `top_up` policy — a limit raised or lowered. |
 | `consumed(wallet, since, until)` | Net amount drawn from a wallet in a period, reversals deducted. |
@@ -53,7 +53,8 @@ order applies within each one. A spent pack is archived like any drained wallet;
 `archive_expired_wallets`.
 
 Opening the wallet empty and crediting it writes the funding to the ledger as a `grant` entry attached to the payment,
-so the origin of each pack's credits can be queried.
+so the origin of each pack's credits can be queried. `metadata=` adds the application's own data to that entry, e.g.
+`metadata={"reason": "promotion", "ticket": 123}`; see [Transaction](/guide/concepts#transaction).
 
 A feature draws from packs by accepting their currency; no separate step is needed. To spend plan credits before any
 pack regardless of expiry — needed when the plan credits are a [windowed](/guide/sliding-windows) wallet, which has no
@@ -195,7 +196,7 @@ Opening and funding run in one transaction: when the guide's budget holds less t
 
 `transfer` never draws on overdraft: the source must hold the amount. Both wallets must be in the same currency; their
 types may differ. The ledger shows a `transfer` entry of −10 on the budget and +10 on the tourist's wallet, both with
-the guide as actor.
+the guide as actor. `metadata=` on `transfer` is recorded on both entries.
 
 **Returning what is left.** At the end of the trip the unspent money goes back with another transfer, in the opposite
 direction:

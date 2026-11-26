@@ -112,6 +112,17 @@ it paid for, and its **actor**: the subject on whose behalf it was made. `fulfil
 for when there is exactly one, or the `actor` passed to it; a group wallet paying for a member's use therefore shows
 the member as the actor. A storno carries the actor passed to `unfulfill`, i.e. who reversed it.
 
+An entry also carries the application's own **metadata**, a JSON-serialisable `dict` or `None`. `fulfill` records the
+`metadata` passed to it on every consumption entry it writes, `credit` on its grant entry, `transfer` on both legs; a
+storno carries a copy of the reversed entry's metadata, and plan adjustments carry none. The library neither prescribes
+nor reads the keys:
+
+```python
+result = await fulfill("send_email", 1, {"user": user},
+                       metadata={"reason": "password reset", "ticket": 123})
+[entry.metadata for entry in result.transactions]   # [{"reason": "password reset", "ticket": 123}]
+```
+
 Transactions are not edited; on archival they are moved with their wallet to the archive. A reversal is a new `storno`
 entry referencing the original. A transaction can be stornoed at most once; the Django store enforces this with a
 unique constraint, `MemoryStore` with a check.

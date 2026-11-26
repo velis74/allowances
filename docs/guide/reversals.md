@@ -49,7 +49,8 @@ zero and [archived](/guide/plans-and-archival), it is no longer in live storage;
 for it.
 
 **The storno records who reversed it.** `unfulfill(guid, actor=support_agent)` puts that actor on every storno entry;
-the original entries keep theirs.
+the original entries keep theirs. Each storno carries a copy of the reversed entry's
+[metadata](/guide/concepts#transaction), so a reversal shows the reason or ticket of the use it gives back.
 
 ## Reversing a transfer
 

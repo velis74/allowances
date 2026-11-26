@@ -1,5 +1,23 @@
 # Upgrading
 
+## Upgrading to 0.5
+
+### Django: run the migration
+
+```sh
+python manage.py migrate allowances
+```
+
+`0005_transaction_metadata` adds the nullable JSON column `metadata` to `Transaction` and `TransactionArchive` (`NULL`
+on existing rows).
+
+### Custom backends: `create_transaction` takes `metadata`
+
+The engine passes `metadata` (a `dict` or `None`) to every `create_transaction` call; a store without the parameter
+raises `TypeError` on the first ledger entry. Add `metadata: dict | None = None`, persist it unchanged and return it on
+every `Transaction` read back, archived copies included. See
+[Writing a backend](/backends/writing-a-backend#further-requirements).
+
 ## Upgrading to 0.4
 
 ### The API is asynchronous
