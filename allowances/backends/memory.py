@@ -17,6 +17,7 @@ their writes made during the block.
 
 from __future__ import annotations
 
+import copy
 import itertools
 import threading
 import uuid
@@ -39,6 +40,11 @@ from allowances.types import (
     WalletType,
 )
 from allowances.windows import utcnow
+
+
+def _detached(txn: Transaction) -> Transaction:
+    """``txn`` with its own copy of ``metadata``, so a change to it does not reach the ledger."""
+    return txn if txn.metadata is None else replace(txn, metadata=copy.deepcopy(txn.metadata))
 
 
 class MemoryStore:
@@ -81,7 +87,8 @@ class MemoryStore:
             self._lock.release()
 
     def _snapshot(self):
-        # Every stored value is a frozen dataclass, so copying the containers is enough.
+        # Every stored value is a frozen dataclass and stored metadata never leaves the store uncopied, so copying
+        # the containers is enough.
         return (
             dict(self._wallets),
             dict(self._transactions),
@@ -210,7 +217,7 @@ class MemoryStore:
         self, *, wallet_id: object, since: datetime, until: datetime
     ) -> list[Transaction]:
         found = [t for t in self._transactions.values() if t.wallet_id == wallet_id and since <= t.created_at <= until]
-        return sorted(found, key=lambda t: self._sort_key("transaction", t))
+        return [_detached(t) for t in sorted(found, key=lambda t: self._sort_key("transaction", t))]
 
     async def create_transaction(
         self,
@@ -223,6 +230,7 @@ class MemoryStore:
         storno_of_id: object = None,
         at: datetime | None = None,
         actor: SubjectRef | None = None,
+        metadata: dict | None = None,
     ) -> Transaction:
         if storno_of_id is not None and any(t.storno_of_id == storno_of_id for t in self._transactions.values()):
             # A transaction may be stornoed at most once.
@@ -237,14 +245,15 @@ class MemoryStore:
             feature=feature,
             storno_of_id=storno_of_id,
             actor=actor,
+            metadata=copy.deepcopy(metadata),
         )
         self._transactions[txn.id] = txn
         self._created_seq[("transaction", txn.id)] = next(self._sequence)
-        return txn
+        return _detached(txn)
 
     async def transactions_for_record(self, *, record_guid: uuid.UUID, lock: bool = False) -> list[Transaction]:
         found = [t for t in self._transactions.values() if t.record_guid == record_guid]
-        return sorted(found, key=lambda t: self._sort_key("transaction", t))
+        return [_detached(t) for t in sorted(found, key=lambda t: self._sort_key("transaction", t))]
 
     async def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         for txn_id in transaction_ids:

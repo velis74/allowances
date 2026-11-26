@@ -136,6 +136,7 @@ await fulfill("send_email", 1, {"user": user, "team": team}, actor=user)
 The actor is the subject the caller passed, never the group it expanded to: when the club's wallet pays for a member's
 use, the entry is on the club's wallet with the member as actor. `credit` and `transfer` take `actor=` and store it as
 given. `unfulfill(guid, actor=...)` records who reversed the entries on the storno entries; the originals keep theirs.
+Why an entry was made (a reason, a ticket number) goes in its [metadata](/guide/concepts#transaction).
 
 ## The Django permissions backend
 

@@ -139,7 +139,7 @@ Closed wallets left by `plan_switch` stay in live storage until it runs.
 
 `WalletArchive` keeps the wallet's final state, when it was originally created, and when it was archived.
 `TransactionArchive` keeps its entries, including the `storno_of` links between them, rebuilt to point at the archived
-copies.
+copies, and each entry's actor and metadata.
 
 `original_wallet_id` is a plain id, not a foreign key: the live row no longer exists.
 

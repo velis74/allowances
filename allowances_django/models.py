@@ -160,6 +160,7 @@ class Transaction(models.Model):
     ``find_unattached_fulfillment_records`` returns its record.
 
     ``actor_type``/``actor_id`` name the subject on whose behalf the entry was made, or are empty.
+    ``metadata`` is the application's JSON data recorded with the entry, or null.
     """
 
     wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name="transactions")
@@ -195,6 +196,12 @@ class Transaction(models.Model):
         blank=True,
         default="",
         help_text="Primary key of the actor, as text. Empty when the entry has no actor.",
+    )
+    metadata = models.JSONField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text="Application data recorded with the entry. The library does not read it.",
     )
     created_at = models.DateTimeField(default=timezone.now)
 
@@ -300,6 +307,12 @@ class TransactionArchive(models.Model):
     object_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH, blank=True)
     actor_type = models.CharField(max_length=NAME_MAX_LENGTH, blank=True, default="")
     actor_id = models.CharField(max_length=SUBJECT_ID_MAX_LENGTH, blank=True, default="")
+    metadata = models.JSONField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text="Application data recorded with the entry. The library does not read it.",
+    )
     original_created_at = models.DateTimeField()
     archived_at = models.DateTimeField(default=timezone.now)
 

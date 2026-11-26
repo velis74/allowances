@@ -109,9 +109,10 @@ class Transaction(Model):
     ``find_unattached_fulfillment_records`` returns its record.
 
     ``actor_type``/``actor_id`` name the subject on whose behalf the entry was made, or are empty.
+    ``metadata`` is the application's JSON data recorded with the entry, or null.
     """
 
-    _meta = ModelMeta("allowances.Transaction", schema_hash="b1c270d002b43bd3")
+    _meta = ModelMeta("allowances.Transaction", schema_hash="3287be9af2a245d7")
     id: int | None = None
     wallet_id: int
     record_id: int | None = Field(
@@ -133,6 +134,10 @@ class Transaction(Model):
         default="",
         description="Primary key of the actor, as text. Empty when the entry has no actor.",
         max_length=64,
+    )
+    metadata: Any = Field(
+        default=None,
+        description="Application data recorded with the entry. The library does not read it.",
     )
     created_at: datetime.datetime | None = None
     wallet = ForeignKey("allowances.Wallet")
@@ -199,7 +204,7 @@ class TransactionArchive(Model):
     from the live table.
     """
 
-    _meta = ModelMeta("allowances.TransactionArchive", schema_hash="cb5840ec4025133c")
+    _meta = ModelMeta("allowances.TransactionArchive", schema_hash="44eccc7b1bab8f5f")
     id: int | None = None
     original_transaction_id: int
     wallet_archive_id: int | None = None
@@ -213,6 +218,10 @@ class TransactionArchive(Model):
     object_id: str = Field(default="", max_length=64)
     actor_type: str = Field(default="", max_length=100)
     actor_id: str = Field(default="", max_length=64)
+    metadata: Any = Field(
+        default=None,
+        description="Application data recorded with the entry. The library does not read it.",
+    )
     original_created_at: datetime.datetime
     archived_at: datetime.datetime | None = None
     wallet_archive = ForeignKey("allowances.WalletArchive")

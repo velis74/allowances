@@ -115,6 +115,7 @@ def to_transaction(row: Transaction, record_guid: uuid.UUID | None = None) -> Co
         storno_of_id=row.storno_of_id,
         obj=ObjectRef(row.object_type, row.object_id) if row.object_type else None,
         actor=SubjectRef(row.actor_type, row.actor_id) if row.actor_type else None,
+        metadata=row.metadata,
     )
 
 
@@ -296,6 +297,7 @@ class DjangoQueries:
                 object_id=txn.object_id,
                 actor_type=txn.actor_type,
                 actor_id=txn.actor_id,
+                metadata=txn.metadata,
                 original_created_at=txn.created_at,
             )
             copy.save(using=self.using)
@@ -344,6 +346,7 @@ class DjangoQueries:
         storno_of_id: object = None,
         at: datetime | None = None,
         actor: SubjectRef | None = None,
+        metadata: dict | None = None,
     ) -> CoreTransaction:
         row = Transaction(
             wallet_id=wallet_id,
@@ -354,6 +357,7 @@ class DjangoQueries:
             storno_of_id=storno_of_id,
             actor_type=actor.type if actor is not None else "",
             actor_id=actor.id if actor is not None else "",
+            metadata=metadata,
         )
         if at is not None:
             row.created_at = at

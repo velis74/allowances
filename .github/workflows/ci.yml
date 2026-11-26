@@ -123,10 +123,11 @@ jobs:
         uses: velis74/incremental-coverage-check@v3
         with:
           coverage-files: coverage.json
-          # Lint and docs tooling: no test measures it.
+          # Lint and docs tooling: no test measures it. Generated adorm models: omitted from coverage.
           extra-ignore-patterns: |
             scripts/**
             docs/**
+            allowances_adorm/models/**
           base-ref: ${{ github.base_ref }}
           head-ref: HEAD
           github-token: ${{ secrets.GITHUB_TOKEN }}

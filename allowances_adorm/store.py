@@ -116,6 +116,7 @@ def to_transaction(row: Transaction, record_guid: uuid.UUID | None) -> CoreTrans
         storno_of_id=row.storno_of_id,
         obj=ObjectRef(row.object_type, row.object_id) if row.object_type else None,
         actor=SubjectRef(row.actor_type, row.actor_id) if row.actor_type else None,
+        metadata=row.metadata,
     )
 
 
@@ -332,6 +333,7 @@ class AdormStore:
                     object_id=txn.object_id,
                     actor_type=txn.actor_type,
                     actor_id=txn.actor_id,
+                    metadata=txn.metadata,
                     original_created_at=txn.created_at,
                     archived_at=archived_at,
                 )
@@ -388,6 +390,7 @@ class AdormStore:
         storno_of_id: object = None,
         at: datetime | None = None,
         actor: SubjectRef | None = None,
+        metadata: dict | None = None,
     ) -> CoreTransaction:
         record_id = await self._record_id(record_guid)
         row = await self._m(Transaction).create(
@@ -399,6 +402,7 @@ class AdormStore:
             storno_of_id=storno_of_id,
             actor_type=actor.type if actor is not None else "",
             actor_id=actor.id if actor is not None else "",
+            metadata=metadata,
             created_at=at if at is not None else _now(),
         )
         return to_transaction(row, record_guid)

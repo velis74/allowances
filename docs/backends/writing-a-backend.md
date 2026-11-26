@@ -26,7 +26,8 @@ class MyStore:
     # ledger
     async def sum_transactions(self, *, wallet_id, since, until) -> Decimal: ...
     async def transactions_for_wallet(self, *, wallet_id, since, until) -> list[Transaction]: ...
-    async def create_transaction(self, *, wallet_id, kind, amount, actor=None, **kwargs) -> Transaction: ...
+    async def create_transaction(self, *, wallet_id, kind, amount, actor=None, metadata=None,
+                                 **kwargs) -> Transaction: ...
     async def transactions_for_record(self, *, record_guid, lock=False) -> list[Transaction]: ...
     async def attach_object(self, *, transaction_ids, obj) -> None: ...
 
@@ -128,6 +129,10 @@ the entries they reverse, the reversing rows are deleted first.
 **`create_transaction` takes an explicit `at`.** Store it as `created_at` instead of the current time; sliding
 windows and backfills depend on it. It also takes `actor`, a `SubjectRef` or `None`; store it and return it on every
 `Transaction` read back, archived copies included.
+
+**`create_transaction` takes `metadata`,** the application's `dict` or `None`. Store it unchanged, without reading it,
+and return it on every `Transaction` read back, archived copies included; a store that keeps Python objects keeps a
+copy, so a later change to the caller's `dict` does not reach the ledger.
 
 **`records_with_unattached_transactions` looks at consumption only.** A record matches when it holds a
 `CONSUMPTION` transaction with no object attached. Credits and transfers never make a record match.

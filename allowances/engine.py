@@ -16,6 +16,7 @@ runs to completion without an event loop, which is how :mod:`allowances.sync` dr
 
 from __future__ import annotations
 
+import copy
 import uuid
 
 from dataclasses import dataclass, replace
@@ -60,6 +61,11 @@ class _Draw:
 
 
 _ZERO = Decimal("0")
+
+
+def _metadata(metadata: dict | None) -> dict | None:
+    """A copy of ``metadata`` for one ledger entry, so entries never share a ``dict`` with the caller or each other."""
+    return copy.deepcopy(metadata)
 
 
 def _negated(amount: Decimal) -> Decimal:
@@ -428,6 +434,7 @@ async def fulfill(
     at: datetime | None = None,
     *,
     actor: SubjectRef | None = None,
+    metadata: dict | None = None,
 ) -> FulfillmentResult:
     """
     Consume ``quantity`` of ``feature`` from the subjects' wallets, writing one ``CONSUMPTION`` entry
@@ -445,7 +452,8 @@ async def fulfill(
     covers the rest of the request; its use is recorded as a consumption entry of amount zero.
 
     ``actor`` is recorded on every entry. Without one, the actor is the single subject of
-    ``subjects`` when it holds exactly one, else ``None``.
+    ``subjects`` when it holds exactly one, else ``None``. ``metadata`` (JSON-serialisable, not read by
+    the library) is recorded on every consumption entry of this call.
 
     Every candidate wallet is locked in one pass, in ascending id order, before balances are read.
     """
@@ -489,6 +497,7 @@ async def fulfill(
                     feature=feature,
                     at=at,
                     actor=actor,
+                    metadata=_metadata(metadata),
                 )
             )
             if draw.cost == 0:
@@ -557,8 +566,8 @@ async def unfulfill(
     Reverse everything recorded under one fulfilment record: consumption, credits and transfers.
 
     Nothing is deleted or edited: each original gets a matching storno entry carrying ``actor`` (who
-    reversed it); the original stays in the ledger next to its storno. A transaction that already
-    has its storno is skipped, so a second call writes nothing.
+    reversed it) and a copy of the original's ``metadata``; the original stays in the ledger next to its
+    storno. A transaction that already has its storno is skipped, so a second call writes nothing.
 
     Reversing a transfer takes the amount back from its target. The check nets every storno of the
     record on that wallet, so a consumption of the transferred amount under the same guid is given
@@ -639,6 +648,7 @@ async def unfulfill(
                 storno_of_id=original.id,
                 at=at,
                 actor=actor,
+                metadata=_metadata(original.metadata),
             )
             if not wallet.reset_config and amount != 0:
                 wallet = replace(wallet, balance=wallet.balance + amount)
@@ -655,12 +665,14 @@ async def credit(
     obj: ObjectRef | None = None,
     actor: SubjectRef | None = None,
     at: datetime | None = None,
+    metadata: dict | None = None,
 ) -> Transaction:
     """
     Add ``amount`` to a wallet's balance, as a ``GRANT`` ledger entry recorded with ``actor``.
 
     ``obj`` attaches the entry to the domain object that paid for it (a payment, an order). ``guid``
-    files the entry under a fulfilment record, so :func:`unfulfill` can reverse it.
+    files the entry under a fulfilment record, so :func:`unfulfill` can reverse it. ``metadata``
+    (JSON-serialisable, not read by the library) is recorded on the entry.
 
     Raises :class:`~allowances.errors.WalletNotFoundError` for an unknown or archived wallet,
     :class:`~allowances.errors.UnsuitableWalletError` for a windowed one or one not valid at ``at``, and
@@ -688,6 +700,7 @@ async def credit(
             record_guid=record_guid,
             at=at,
             actor=actor,
+            metadata=_metadata(metadata),
         )
         if obj is not None:
             await store.attach_object(transaction_ids=[txn.id], obj=obj)
@@ -706,14 +719,16 @@ async def transfer(
     obj: ObjectRef | None = None,
     actor: SubjectRef | None = None,
     at: datetime | None = None,
+    metadata: dict | None = None,
 ) -> FulfillmentResult:
     """
     Move ``amount`` from one wallet to another of the same currency.
 
     Writes two ``TRANSFER`` entries under one fulfilment record (``guid``, or a new one): a debit
-    on the source and a credit on the target, both recorded with ``actor`` and attached to ``obj``
-    when given. The wallet types may differ. A windowed wallet's stored allotment is not changed;
-    the entries count in its window like any other. :func:`unfulfill` reverses both legs.
+    on the source and a credit on the target, both recorded with ``actor`` and ``metadata``
+    (JSON-serialisable, not read by the library) and attached to ``obj`` when given. The wallet types
+    may differ. A windowed wallet's stored allotment is not changed; the entries count in its window
+    like any other. :func:`unfulfill` reverses both legs.
 
     The source must hold the amount (``max(effective_balance, 0) >= amount``); overdraft is never
     used. Both wallets are locked in one pass, in ascending id order.
@@ -772,6 +787,7 @@ async def transfer(
                     record_guid=record.guid,
                     at=at,
                     actor=actor,
+                    metadata=_metadata(metadata),
                 )
             )
             if not wallet.reset_config:

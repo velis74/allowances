@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0 — 2026-11-26
+
+Upgrade steps: [Upgrading to 0.5](https://docs.velis.si/allowances/guide/upgrading#upgrading-to-0-5).
+
+### Added
+
+- `Transaction.metadata`: the application's own JSON-serialisable `dict` recorded with a ledger entry; the library
+  neither prescribes nor reads its keys. `fulfill` records `metadata=` on every consumption entry of the call, `credit`
+  on its grant entry and `transfer` on both legs; `unfulfill` copies the reversed entry's metadata onto each storno.
+  Archival keeps it.
+- Django: `metadata` (`JSONField`, null) on `Transaction` and `TransactionArchive`, migration
+  `0005_transaction_metadata`; `metadata=` on the shortcuts `fulfill`, `credit` and `transfer`. The adorm store and
+  its generated models carry the column.
+
+### Changed
+
+- Store port (breaking for custom stores): `create_transaction` takes `metadata: dict | None = None`, which the engine
+  passes on every call.
+
 ## 0.4.0 — 2026-11-23
 
 Upgrade steps: [Upgrading to 0.4](https://docs.velis.si/allowances/guide/upgrading#upgrading-to-0-4).
