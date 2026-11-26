@@ -170,10 +170,14 @@ class Store(Protocol):
         storno_of_id: object = None,
         at: datetime | None = None,
         actor: SubjectRef | None = None,
+        metadata: dict | None = None,
     ) -> Transaction:
         """
         Append a ledger entry. ``amount`` is signed; ``actor`` is the subject on whose behalf the
         entry is made.
+
+        ``metadata`` is the application's JSON-serialisable data for the entry. The store persists it
+        unchanged and returns it on every :class:`~allowances.types.Transaction` it reads.
 
         A transaction is stornoed at most once; the backend enforces this with a uniqueness
         constraint on ``storno_of_id``. Without it, two concurrent reversals refund twice.

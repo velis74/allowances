@@ -184,6 +184,9 @@ class Transaction:
     carries the negated amount of the entry it reverses.
 
     ``actor`` is the subject on whose behalf the entry was made, or ``None`` when none was given.
+
+    ``metadata`` is the application's data recorded with the entry (JSON-serialisable), or ``None``.
+    The library does not read it.
     """
 
     id: object
@@ -196,6 +199,7 @@ class Transaction:
     storno_of_id: object = None
     obj: ObjectRef | None = None
     actor: SubjectRef | None = None
+    metadata: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
