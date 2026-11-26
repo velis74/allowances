@@ -417,6 +417,16 @@ class AdormStore:
             qs = qs.select_for_update()
         return [to_transaction(row, record_guid) async for row in qs]
 
+    async def transactions_for_object(self, *, obj: ObjectRef) -> list[CoreTransaction]:
+        rows = [
+            row
+            async for row in self._m(Transaction)
+            .filter(object_type=obj.type, object_id=obj.id)
+            .order_by("created_at", "id")
+        ]
+        guids = await self._record_guids(row.record_id for row in rows)
+        return [to_transaction(row, guids.get(row.record_id)) for row in rows]
+
     async def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         ids = list(transaction_ids)
         if ids:

@@ -39,6 +39,7 @@ SHORTCUTS = [
     "peek",
     "plan_switch",
     "remove_member",
+    "transactions_for_object",
     "transfer",
     "unfulfill",
 ]

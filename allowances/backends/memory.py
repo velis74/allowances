@@ -255,6 +255,10 @@ class MemoryStore:
         found = [t for t in self._transactions.values() if t.record_guid == record_guid]
         return [_detached(t) for t in sorted(found, key=lambda t: self._sort_key("transaction", t))]
 
+    async def transactions_for_object(self, *, obj: ObjectRef) -> list[Transaction]:
+        found = [t for t in self._transactions.values() if t.obj == obj]
+        return [_detached(t) for t in sorted(found, key=lambda t: self._sort_key("transaction", t))]
+
     async def attach_object(self, *, transaction_ids: Sequence[object], obj: ObjectRef) -> None:
         for txn_id in transaction_ids:
             txn = self._transactions.get(txn_id)

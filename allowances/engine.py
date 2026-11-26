@@ -2,8 +2,8 @@
 The fulfilment engine: ``peek``, ``fulfill``, ``attach``, ``unfulfill``, ``credit``, ``transfer``,
 ``open_wallet``, ``adjust_wallet``, ``close_wallet``, ``consumed``, ``effective_balance``, ``plan_switch``,
 ``cancel_scheduled_switch``, ``effective_allowances``, ``archive_expired_wallets``,
-``find_unattached_fulfillment_records``, and the membership functions ``add_member``, ``remove_member`` and
-``groups_of``.
+``find_unattached_fulfillment_records``, ``transactions_for_object``, and the membership functions
+``add_member``, ``remove_member`` and ``groups_of``.
 
 The module contains no storage code. It operates on a :class:`~allowances.store.Store` and a
 :class:`~allowances.definitions.DefinitionProvider` and runs against any ``Store`` implementation
@@ -30,6 +30,7 @@ from allowances.errors import (
     MembershipCycleError,
     RecordNotFoundError,
     UnsuitableWalletError,
+    UnsupportedOperationError,
     WalletNotFoundError,
 )
 from allowances.rounding import apply_round
@@ -1204,6 +1205,35 @@ async def find_unattached_fulfillment_records(store: Store, older_than: datetime
     appear here.
     """
     return await store.records_with_unattached_transactions(older_than=older_than)
+
+
+async def transactions_for_object(store: Store, obj: ObjectRef) -> list[Transaction]:
+    """
+    The ledger entries of one domain object, oldest first: every live entry attached to ``obj``
+    (by :func:`attach`, or ``obj=`` of :func:`credit` and :func:`transfer`) and every storno that
+    reverses one of them. The sum of their ``amount`` is the object's net effect on the ledger.
+
+    A storno that reverses an entry of another object is left out, even when it is attached to
+    ``obj``. Entries of archived wallets are not returned; an unknown object gives an empty list.
+
+    Raises :class:`~allowances.errors.UnsupportedOperationError` when the store has no
+    ``transactions_for_object``.
+    """
+    find = getattr(store, "transactions_for_object", None)
+    if find is None:
+        raise UnsupportedOperationError(f"{type(store).__name__} does not implement transactions_for_object")
+    async with store.unit_of_work():
+        attached = await find(obj=obj)
+        originals = {t.id for t in attached if t.kind != TransactionKind.STORNO}
+        entries = [t for t in attached if t.kind != TransactionKind.STORNO or t.storno_of_id in originals]
+        seen = {t.id for t in entries}
+        guids = list(dict.fromkeys(t.record_guid for t in attached if t.record_guid is not None))
+        for guid in guids:
+            for txn in await store.transactions_for_record(record_guid=guid):
+                if txn.storno_of_id in originals and txn.id not in seen:
+                    entries.append(txn)
+                    seen.add(txn.id)
+    return sorted(entries, key=lambda t: (t.created_at, t.id))
 
 
 # -------------------------------------------------------------------------------------------------

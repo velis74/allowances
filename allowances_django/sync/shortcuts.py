@@ -40,6 +40,7 @@ open_wallet = synchronous(_shortcuts.open_wallet, __name__)
 peek = synchronous(_shortcuts.peek, __name__)
 plan_switch = synchronous(_shortcuts.plan_switch, __name__)
 remove_member = synchronous(_shortcuts.remove_member, __name__)
+transactions_for_object = synchronous(_shortcuts.transactions_for_object, __name__)
 transfer = synchronous(_shortcuts.transfer, __name__)
 unfulfill = synchronous(_shortcuts.unfulfill, __name__)
 
@@ -62,6 +63,7 @@ __all__ = [
     "peek",
     "plan_switch",
     "remove_member",
+    "transactions_for_object",
     "transfer",
     "unfulfill",
 ]

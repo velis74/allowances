@@ -73,6 +73,7 @@ open_wallet = synchronous(_engine.open_wallet)
 peek = synchronous(_engine.peek)
 plan_switch = synchronous(_engine.plan_switch)
 remove_member = synchronous(_engine.remove_member)
+transactions_for_object = synchronous(_engine.transactions_for_object)
 transfer = synchronous(_engine.transfer)
 unfulfill = synchronous(_engine.unfulfill)
 
@@ -123,6 +124,7 @@ __all__ = [
     "peek",
     "plan_switch",
     "remove_member",
+    "transactions_for_object",
     "transfer",
     "unfulfill",
     "unit_of_work",
