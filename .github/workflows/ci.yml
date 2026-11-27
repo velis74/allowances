@@ -132,3 +132,12 @@ jobs:
           head-ref: HEAD
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pr-number: ${{ github.event.pull_request.number }}
+
+  # the required status check: fails when any other job of this workflow failed or was cancelled
+  all-green:
+    if: always()
+    needs: [python, node, coverage]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
